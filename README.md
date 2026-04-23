@@ -1,19 +1,29 @@
 # claude-statusline
 
-Subscription-aware status line for [Claude Code](https://code.claude.com).
+![license](https://img.shields.io/github/license/cvrt-gmbh/claude-statusline)
 
-Shows, in a single line:
+> Subscription-aware status line for Claude Code.
 
-- `[A]` active account (from your mapping in `accounts.toml`)
-- `Opus` active model
-- `ctx 42%` context-window usage
-- `5h 67% (2h12m)` 5-hour rate-limit usage + time to reset
-- `7d 41%` 7-day rate-limit usage
-- `main` git branch
+Built for Claude Max / Team Max plans where dollar amounts and burn-rate are meaningless.
 
-No dollar amounts, no burn rate - this is built for Claude Max / Team Max subscription plans where those numbers are meaningless.
+## Features
 
-## Install
+- Active account label (map any logged-in email to a short tag)
+- Active model display
+- Context-window usage with color thresholds
+- 5-hour rate-limit usage + countdown to reset
+- 7-day rate-limit usage
+- Git branch for orientation
+- Graceful degradation when fields are missing (never blanks the bar)
+
+## Prerequisites
+
+- macOS or Linux
+- bash
+- `jq` (`brew install jq`)
+- git (optional, only needed for the branch segment)
+
+## Installation
 
 ```bash
 git clone https://github.com/cvrt-gmbh/claude-statusline
@@ -34,16 +44,28 @@ Then add the snippet printed by the installer to `~/.claude/settings.json`:
 
 Restart Claude Code.
 
-## Requirements
+## Usage
 
-- macOS or Linux
-- bash
-- `jq` (`brew install jq`)
-- git (optional, only for the branch segment)
+After install, Claude Code renders a line like:
+
+```
+[JAY] · Opus · ctx 42% · 5h 67% (2h12m) · 7d 41% · main
+```
+
+Each segment:
+
+| Segment | Source | Color thresholds (green / yellow / red) |
+|---|---|---|
+| `[JAY]` | `~/.claude.json` email mapped via `accounts.toml` | mirrors 5h |
+| `Opus` | `.model.display_name` | dim |
+| `ctx 42%` | `.context_window.used_percentage` | <50 / 50-69 / >=70 |
+| `5h 67% (2h12m)` | `.rate_limits.five_hour` + countdown to `resets_at` | <50 / 50-89 / >=90 |
+| `7d 41%` | `.rate_limits.seven_day.used_percentage` | <50 / 50-89 / >=90 |
+| `main` | `git symbolic-ref --short HEAD` | dim |
 
 ## Configuration
 
-Edit `~/.config/claude-statusline/accounts.toml`:
+Edit `~/.config/claude-statusline/accounts.toml` to map your Claude account emails to labels:
 
 ```toml
 [[account]]
@@ -53,34 +75,23 @@ label = "A"
 [[account]]
 email = "you+work@example.com"
 label = "B"
-
-[[account]]
-email = "you+third@example.com"
-label = "C"
 ```
 
-The script reads the current account from `~/.claude.json` (`.oauthAccount.emailAddress`) and shows the matching label. Unmapped emails show `[?]`.
+The script reads the current account from `~/.claude.json` (`.oauthAccount.emailAddress`) every tick. Logging out and back into a different account flips the label within one refresh (up to 5 seconds). Unmapped emails render as `[?]`.
 
-## Color thresholds
-
-| Widget | Green | Yellow | Red |
-|---|---|---|---|
-| ctx | <50% | 50-69% | >=70% |
-| 5h | <50% | 50-89% | >=90% |
-| 7d | <50% | 50-89% | >=90% |
-| account tag | mirrors 5h | mirrors 5h | mirrors 5h |
-
-## Testing
+## Development
 
 ```bash
 ./test/run.sh
 ```
 
+13 fixture-driven assertions across four input shapes (full, no rate_limits, null context, not-git cwd). Exits 0 on green.
+
 ## Graceful degradation
 
 The script never blanks the status bar. When data is missing:
 
-- No `rate_limits` (pre-first-response, or non-Pro/Max account): 5h and 7d segments are omitted.
+- No `rate_limits` (pre-first-response, or non-Pro/Max account): 5h and 7d segments omitted.
 - Null `context_window.used_percentage`: ctx segment omitted.
 - No `accounts.toml` or email not mapped: account tag shows `[?]`.
 - `cwd` not a git repo: branch segment omitted.
@@ -88,4 +99,4 @@ The script never blanks the status bar. When data is missing:
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
