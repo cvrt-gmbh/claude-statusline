@@ -60,17 +60,19 @@ account_label() {
   local config="${XDG_CONFIG_HOME:-$HOME/.config}/claude-statusline/accounts.toml"
   [[ -f "$config" ]] || { printf '?'; return 0; }
   [[ -n "$email" ]]  || { printf '?'; return 0; }
-  # Lightweight TOML parse: pair each email line with the following label line.
+  # Lightweight TOML parse: buffer email+label per [[account]] block (order-independent).
   awk -v target="$email" '
+    /^\[\[account\]\]/ { email_val=""; label_val=""; next }
     /^[[:space:]]*email[[:space:]]*=/ {
       match($0, /"[^"]*"/)
-      if (RSTART) current = substr($0, RSTART + 1, RLENGTH - 2)
+      if (RSTART) email_val = substr($0, RSTART + 1, RLENGTH - 2)
     }
     /^[[:space:]]*label[[:space:]]*=/ {
-      if (current == target) {
-        match($0, /"[^"]*"/)
-        if (RSTART) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
-      }
+      match($0, /"[^"]*"/)
+      if (RSTART) label_val = substr($0, RSTART + 1, RLENGTH - 2)
+    }
+    email_val != "" && label_val != "" && email_val == target {
+      print label_val; exit
     }
   ' "$config" | head -n1 | grep -E '.' || printf '?'
 }
@@ -122,12 +124,17 @@ render() {
     local five_h_int=${five_h_used%.*}
     local five_h_color
     five_h_color=$(color_for_pct "$five_h_int" 50 90)
-    local resets_at now remaining countdown
-    resets_at=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.resets_at // 0')
-    now=$(date +%s)
-    remaining=$(( resets_at - now ))
-    countdown=$(format_duration "$remaining")
-    segments+=("${five_h_color}5h ${five_h_int}% (${countdown})${C_RESET}")
+    local resets_at
+    resets_at=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+    if [[ -n "$resets_at" ]]; then
+      local now remaining countdown
+      now=$(date +%s)
+      remaining=$(( resets_at - now ))
+      countdown=$(format_duration "$remaining")
+      segments+=("${five_h_color}5h ${five_h_int}% (${countdown})${C_RESET}")
+    else
+      segments+=("${five_h_color}5h ${five_h_int}%${C_RESET}")
+    fi
   fi
 
   # Widget 5: 7d window.
