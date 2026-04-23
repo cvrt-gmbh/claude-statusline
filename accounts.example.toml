@@ -1,0 +1,16 @@
+# claude-statusline account map.
+# Each [[account]] block maps a Claude account email to a short label (A/B/C).
+# The label appears as the first segment of the status line.
+# First match wins; unmapped emails render as [?].
+
+[[account]]
+email = "you@example.com"
+label = "A"
+
+[[account]]
+email = "you+two@example.com"
+label = "B"
+
+[[account]]
+email = "you+three@example.com"
+label = "C"
