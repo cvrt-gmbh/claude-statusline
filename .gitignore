@@ -1,0 +1,13 @@
+# Local account config (may contain email addresses)
+accounts.toml
+
+# User-scoped agent instructions (never committed per global rules)
+CLAUDE.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
