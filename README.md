@@ -1,5 +1,6 @@
 # claude-statusline
 
+![CI](https://github.com/cvrt-gmbh/claude-statusline/actions/workflows/ci.yml/badge.svg)
 ![license](https://img.shields.io/github/license/cvrt-gmbh/claude-statusline)
 
 > Subscription-aware status line for Claude Code.
@@ -19,7 +20,7 @@ Built for Claude Max / Team Max plans where dollar amounts and burn-rate are mea
 ## Prerequisites
 
 - macOS or Linux
-- bash
+- bash 3.2 or newer (works with the bash that ships on macOS)
 - `jq` (`brew install jq`)
 - git (optional, only needed for the branch segment)
 
@@ -49,7 +50,7 @@ Restart Claude Code.
 After install, Claude Code renders a line like:
 
 ```
-[JAY] · Opus · ctx 42% · 5h 67% (2h12m) · 7d 41% · main
+[JAY] · Opus · ctx 42% · 5h 67% (2h 12m) · 7d 41% · main
 ```
 
 Each segment:
@@ -59,9 +60,16 @@ Each segment:
 | `[JAY]` | `~/.claude.json` email mapped via `accounts.toml` | mirrors 5h |
 | `Opus` | `.model.display_name` | dim |
 | `ctx 42%` | `.context_window.used_percentage` | <50 / 50-69 / >=70 |
-| `5h 67% (2h12m)` | `.rate_limits.five_hour` + countdown to `resets_at` | <50 / 50-89 / >=90 |
+| `5h 67% (2h 12m)` | `.rate_limits.five_hour` + countdown to `resets_at` | <50 / 50-89 / >=90 |
 | `7d 41%` | `.rate_limits.seven_day.used_percentage` | <50 / 50-89 / >=90 |
-| `main` | `git symbolic-ref --short HEAD` | dim |
+| `main` | `git symbolic-ref --short HEAD`, or `@abc1234` when detached | dim |
+
+Percentages arrive as floats (e.g. `89.7`) and are rounded half-up, so a value
+sitting on a threshold escalates rather than under-reporting: `89.7` renders as
+`90%` in red, not `89%` in yellow.
+
+The 5h countdown is omitted when the reset time has already passed, rather than
+showing `(0m)`.
 
 ## Configuration
 
@@ -82,10 +90,23 @@ The script reads the current account from `~/.claude.json` (`.oauthAccount.email
 ## Development
 
 ```bash
-./test/run.sh
+./test/run.sh                                                   # tests
+shellcheck --shell=bash claude-statusline.sh install.sh test/run.sh   # lint
 ```
 
-13 fixture-driven assertions across four input shapes (full, no rate_limits, null context, not-git cwd). Exits 0 on green.
+Fixture-driven assertions covering the full payload, missing `rate_limits`, null
+context, a non-git cwd, an already-elapsed reset, color thresholds, malformed
+JSON, and an empty object -- plus colors, exit codes, stderr cleanliness,
+detached `HEAD`, and account-label mapping. Exits 0 on green.
+
+Fixtures may contain `__RESET_FUTURE__`, `__RESET_FUTURE_7D__`, and `__CWD__`
+placeholders, substituted at run time. Reset timestamps must stay computed rather
+than hardcoded -- a fixed far-future epoch once let the countdown render
+`615298h 15m` while every substring assertion still passed.
+
+CI runs lint and tests on Linux and macOS. Both matter: macOS ships bash 3.2, and
+a bash 4+ builtin once broke every macOS user while Linux stayed green. Avoid
+`mapfile`, `readarray`, `declare -A`, and `${var,,}`.
 
 ## Graceful degradation
 
@@ -96,6 +117,10 @@ The script never blanks the status bar. When data is missing:
 - No `accounts.toml` or email not mapped: account tag shows `[?]`.
 - `cwd` not a git repo: branch segment omitted.
 - `jq` missing: prints a one-line warning and exits 0.
+- Malformed JSON: renders `[claude-statusline: bad input]`, no stderr noise.
+- 5h reset already elapsed, or a non-numeric `resets_at`: countdown omitted, percentage still shown.
+- Detached `HEAD`: branch segment shows the short SHA (`@abc1234`).
+- `git` not installed: branch segment omitted.
 
 ## License
 

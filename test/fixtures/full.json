@@ -1,9 +1,9 @@
 {
-  "cwd": "/Users/jh/Git/cvrt-jh/.dotfiles",
+  "cwd": "__CWD__",
   "session_id": "abc123",
   "transcript_path": "/tmp/transcript.jsonl",
   "model": { "id": "claude-opus-4-7", "display_name": "Opus" },
-  "workspace": { "current_dir": "/Users/jh/Git/cvrt-jh/.dotfiles", "project_dir": "/Users/jh/Git/cvrt-jh/.dotfiles", "added_dirs": [] },
+  "workspace": { "current_dir": "__CWD__", "project_dir": "__CWD__", "added_dirs": [] },
   "version": "2.1.90",
   "output_style": { "name": "default" },
   "cost": { "total_cost_usd": 0, "total_duration_ms": 0, "total_api_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0 },
@@ -11,12 +11,12 @@
     "total_input_tokens": 50000,
     "total_output_tokens": 5000,
     "context_window_size": 200000,
-    "used_percentage": 42,
-    "remaining_percentage": 58
+    "used_percentage": 42.4,
+    "remaining_percentage": 57.6
   },
   "exceeds_200k_tokens": false,
   "rate_limits": {
-    "five_hour": { "used_percentage": 67, "resets_at": 4000000000 },
-    "seven_day": { "used_percentage": 41, "resets_at": 4000086400 }
+    "five_hour": { "used_percentage": 67.2, "resets_at": __RESET_FUTURE__ },
+    "seven_day": { "used_percentage": 41.2, "resets_at": __RESET_FUTURE_7D__ }
   }
 }
