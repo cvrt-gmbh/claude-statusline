@@ -111,7 +111,11 @@ assert_contains full.json "7d 41%"
 # Bug 1 regression: countdown must be a plausible sub-5h duration, not 615298h.
 assert_matches  full.json '5h 67% \(2h 1[12]m\)' "renders a plausible 5h countdown"
 assert_matches  full.json '^\[' "starts with the account tag"
-assert_contains full.json "main"
+# Compare against the branch actually checked out. Hardcoding "main" made this
+# assertion pass only while the repo happened to be on main, so it failed on
+# every feature branch for a segment that was rendering correctly.
+assert_contains full.json "$(git -C "$repo_dir" symbolic-ref --short HEAD 2>/dev/null \
+  || git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null)"
 assert_exit_zero full.json
 assert_no_stderr full.json
 
