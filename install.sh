@@ -45,7 +45,11 @@ Test the script directly:
 
   $script_dir/claude-statusline.sh < $script_dir/test/fixtures/full.json
 
-Run the smoke tests:
+Run the tests:
 
   cd $script_dir && ./test/run.sh
+
+Lint (optional, requires shellcheck):
+
+  cd $script_dir && shellcheck --shell=bash claude-statusline.sh install.sh test/run.sh
 EOF

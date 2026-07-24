@@ -1,0 +1,9 @@
+{
+  "cwd": "/tmp",
+  "model": { "id": "claude-opus-4-7", "display_name": "Opus" },
+  "context_window": { "used_percentage": 69.6 },
+  "rate_limits": {
+    "five_hour": { "used_percentage": 89.7, "resets_at": __RESET_FUTURE__ },
+    "seven_day": { "used_percentage": 0.4, "resets_at": __RESET_FUTURE_7D__ }
+  }
+}
