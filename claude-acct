@@ -10,6 +10,7 @@
 #   claude-acct login [EMAIL]    log in to another account and save it, open sessions untouched
 #   claude-acct use LABEL        switch every session to LABEL, then nudge
 #   claude-acct list             saved accounts, active one, cached usage
+#   claude-acct refresh          reload every account's usage from the API
 #   claude-acct nudge [--dry-run] send "continue" to sessions stopped by a limit
 #   claude-acct handle-url URL   entry point for claude-acct://use/LABEL links
 #   claude-acct install-handler  build the URL handler app (macOS)
@@ -37,6 +38,9 @@ URL_SCHEME="claude-acct"
 # ~4 KiB. Hex doubles the size, so values up to 2000 chars go that way and
 # never appear in the process list; longer ones fall back to argv.
 STDIN_MAX=2000
+USAGE_URL=${CLAUDE_ACCT_USAGE_URL:-"https://api.anthropic.com/api/oauth/usage"}
+TOKEN_URL=${CLAUDE_ACCT_TOKEN_URL:-"https://platform.claude.com/v1/oauth/token"}
+CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's OAuth client
 
 log() {
   mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
@@ -288,6 +292,8 @@ cmd_use() {
   log "use $label ($new_email), was ${cur_label:-?} (${email:-?})"
   printf 'switched to %s (%s)\n' "$label" "$new_email"
 
+  cmd_refresh >/dev/null 2>&1 || true
+
   local resumed=""
   if (( nudge )); then
     # Give running sessions a moment to pick up the new credential first.
@@ -345,6 +351,97 @@ cmd_nudge() {
       printf 'continued %s\n' "$id"
     fi
   done < <(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null)
+}
+
+# fetch_usage BLOB -> "five|five_reset|seven|seven_reset" from the usage API,
+# the numbers Claude Code itself shows. Fails when the access token expires
+# within a minute: refreshing it here would rotate the refresh token that the
+# running sessions (or the slot) hold. The token goes to curl through a mode-600
+# header file, never argv.
+fetch_usage() {
+  local blob=$1 exp now token hdr json rc
+  exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$blob" 2>/dev/null) || return 1
+  token=$(jq -r '.claudeAiOauth.accessToken // empty' <<<"$blob" 2>/dev/null) || return 1
+  now=$(( $(date +%s) * 1000 ))
+  [[ -n "$token" && $exp =~ ^[0-9]+$ ]] && (( exp > now + 60000 )) || return 1
+  hdr=$(umask 077 && mktemp) || return 1
+  printf 'Authorization: Bearer %s\n' "$token" >"$hdr"
+  unset token
+  json=$(curl -sf --max-time 10 "$USAGE_URL" -H @"$hdr" -H 'anthropic-beta: oauth-2025-04-20'); rc=$?
+  rm -f "$hdr"
+  (( rc == 0 )) || return 1
+  jq -er '
+    def ts: if . == null then "" else sub("\\.[0-9]+"; "") | sub("(\\+00:00)?$"; "Z") | sub("ZZ$"; "Z") | fromdateiso8601 | tostring end;
+    def pct: if . == null then "" else tostring end;
+    select(.five_hour != null or .seven_day != null)
+    | [ (.five_hour.utilization | pct), (.five_hour.resets_at | ts),
+        (.seven_day.utilization | pct), (.seven_day.resets_at | ts) ] | join("|")' <<<"$json" 2>/dev/null
+}
+
+# renew_slot LABEL BLOB -> renewed blob, stored in LABEL's slot first.
+# Only for an account no session uses: the slot is then the sole holder of the
+# refresh token, so rotating it breaks nothing. Never call it for the active
+# account, whose refresh token the running sessions hold. The refresh token
+# goes to curl through a mode-600 body file, never argv.
+renew_slot() {
+  local label=$1 blob=$2 rt body resp new
+  rt=$(jq -r '.claudeAiOauth.refreshToken // empty' <<<"$blob" 2>/dev/null)
+  [[ -n "$rt" ]] || return 1
+  body=$(umask 077 && mktemp) || return 1
+  jq -n --arg rt "$rt" --arg cid "$CLIENT_ID" \
+    '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}' >"$body"
+  unset rt
+  resp=$(curl -sf --max-time 15 "$TOKEN_URL" -H 'Content-Type: application/json' --data @"$body")
+  local rc=$?
+  rm -f "$body"
+  (( rc == 0 )) || return 1
+  new=$(jq -c --argjson r "$resp" --arg now "$(date +%s)" '
+    select($r.access_token != null)
+    | .claudeAiOauth.accessToken = $r.access_token
+    | .claudeAiOauth.refreshToken = ($r.refresh_token // .claudeAiOauth.refreshToken)
+    | .claudeAiOauth.expiresAt = (($now | tonumber) + ($r.expires_in // 3600)) * 1000' <<<"$blob" 2>/dev/null)
+  unset resp
+  [[ -n "$new" ]] || return 1
+  kc_write "$SLOT_SVC" "$label" "$new" || { log "ERROR renewed $label but could not store it"; return 1; }
+  log "renewed $label's token"
+  printf '%s' "$new"
+}
+
+# refresh: overwrite every saved account's usage cache with the API's numbers.
+# The active account is read with the live credential, the others with their
+# slot. Run after every switch, so a switch never starts from borrowed numbers.
+cmd_refresh() {
+  local email cur f label pemail blob usage tmp
+  email=$(current_email)
+  cur=$(label_for_email "$email")
+  [[ -d "$PROFILES_DIR" ]] || { echo "no saved accounts (claude-acct save)"; return 0; }
+  mkdir -p "$CACHE_DIR"
+  for f in "$PROFILES_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    label=$(basename "$f" .json)
+    valid_label "$label" || continue
+    pemail=$(jq -r '.emailAddress // empty' "$f" 2>/dev/null)
+    [[ -n "$pemail" ]] || continue
+    if [[ "$label" == "$cur" ]]; then
+      local acct
+      acct=$(kc_account "$ACTIVE_SVC")
+      blob=$(kc_read "$ACTIVE_SVC" "${acct:-${USER:-$(id -un)}}")
+    else
+      blob=$(kc_read "$SLOT_SVC" "$label")
+      if ! fetch_usage "$blob" >/dev/null 2>&1; then
+        blob=$(renew_slot "$label" "$blob") || blob=""
+      fi
+    fi
+    if usage=$(fetch_usage "$blob"); then
+      tmp="$CACHE_DIR/.usage.$$"
+      printf '%s\n' "$usage" >"$tmp" && mv -f "$tmp" "$CACHE_DIR/usage-$(printf '%s' "$pemail" | tr -c 'A-Za-z0-9._@-' '_')"
+      printf '%-6s %s\n' "$label" "$(awk -F'|' '{ printf "5h %s%% · 7d %s%%", ($1 == "" ? "-" : int($1 + 0.5)), ($3 == "" ? "-" : int($3 + 0.5)) }' <<<"$usage")"
+    else
+      printf '%-6s unchanged (token could not be used or renewed, API unreachable?)\n' "$label"
+    fi
+    unset blob
+  done
+  log "refresh"
 }
 
 cmd_list() {
@@ -442,11 +539,12 @@ main() {
     login) cmd_login "$@" ;;
     use) cmd_use "$@" ;;
     list) cmd_list ;;
+    refresh) cmd_refresh ;;
     nudge) cmd_nudge "$@" ;;
     handle-url) cmd_handle_url "$@" ;;
     install-handler) cmd_install_handler ;;
     doctor) cmd_doctor ;;
-    *) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 1 ;;
+    *) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 1 ;;
   esac
 }
 

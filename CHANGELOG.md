@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `claude-acct refresh`: reload every saved account's 5h/7d usage from the
+  usage API. The active account is read with the live login; an inactive
+  account whose access token expired gets it renewed and stored back in its
+  slot (the active account's token is never renewed). Runs after every `use`.
+
+### Fixed
+
+- A session that still carried the previous account's numbers right after a
+  switch could publish them under the new account, and because that account's
+  week reset later, they stuck: INFO showed JAY's 7d 10% while its real 7d was
+  70%. A reading with a different reset is now rejected while the stored
+  window is still running.
+
 - Account table: with saved `claude-acct` profiles, the status bar lists each
   account on its own line with aligned 5h/7d columns, `→` on the active account
   and `⇄` on the least used account that still has 5h and 7d left. Replaces the

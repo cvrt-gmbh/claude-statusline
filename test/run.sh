@@ -303,8 +303,8 @@ expect "fresh higher reading from another session wins" \
   "$(tick a@example.com s2 85 "$r5" 31 "$r7")" "5h 85%"
 expect "first session follows the newer reading on its next tick" \
   "$(tick a@example.com s1 80 "$r5" 30 "$r7")" "5h 85%"
-expect "a later window beats a higher percentage of an older window" \
-  "$(tick a@example.com s1 2 "$r5_late" 31 "$r7")" "5h 2%"
+expect "a reading of another window is rejected while the stored one still runs" \
+  "$(tick a@example.com s1 2 "$r5_late" 31 "$r7")" "5h 85%"
 
 # Account switch: s1 still carries account a's numbers (unchanged payload).
 # They must neither show nor leak into account b's cache.
@@ -313,6 +313,17 @@ out=$(tick b@example.com s1 2 "$r5_late" 31 "$r7")
 expect "after a switch, a stale session shows the new account's 5h" "$out" "5h 5%"
 expect "after a switch, a stale session shows the new account's 7d" "$out" "7d 1%"
 expect "the stale numbers did not leak into the new account's cache" \
+  "$(tick b@example.com s3 - - - -)" "5h 5%"
+
+# The 2026-10-10 incident: right after a switch, a session receives one more
+# response of the OLD account. Its payload changes, so it publishes, under the
+# new account's email. The old account's week resets later; that must not count
+# as "newer" while the new account's own week is still running.
+r7_other=$(( now + 400000 ))
+out=$(tick b@example.com s1 3 "$r5_late" 10 "$r7_other")
+expect "a changed reading of the previous account does not replace the 7d" \
+  "$(tick b@example.com s3 - - - -)" "7d 1%"
+expect "a changed reading of the previous account does not replace the 5h" \
   "$(tick b@example.com s3 - - - -)" "5h 5%"
 
 # An elapsed shared window means the account starts the new window at 0%. It
@@ -326,6 +337,9 @@ if [[ "$out" == *"5h 0% "* && "$out" != *"5h 0% ("* && "$out" == *"7d 40%"* ]]; 
 else
   bad "elapsed shared 5h window should render 0%" "$out"
 fi
+tick c@example.com s1 12 "$r5" 41 "$r7" >/dev/null
+expect "once the stored window is over, the next window's reading replaces it" \
+  "$(tick c@example.com s3 - - - -)" "5h 12%"
 
 # Without a logged-in account there is no key, so nothing is cached.
 before=$(find "$XDG_CACHE_HOME" -name 'usage-*' | wc -l | tr -d ' ')

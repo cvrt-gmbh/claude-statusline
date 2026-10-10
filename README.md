@@ -126,7 +126,8 @@ claude-acct save            # save the account that is logged in now
 claude-acct login           # log in to another account and save it; open sessions stay put
 claude-acct install-handler # builds ~/Applications/ClaudeAcct.app for claude-acct:// links
 claude-acct use INFO        # switch every session to INFO
-claude-acct list            # saved accounts and their last known usage
+claude-acct list
+claude-acct refresh   # reload every account's usage from the API            # saved accounts and their last known usage
 claude-acct doctor          # checks the setup, never prints secrets
 ```
 

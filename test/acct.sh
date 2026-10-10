@@ -95,7 +95,29 @@ printf 'add-generic-password -U -a "jh" -s "%s" -w %s\n' "$svc" \
   | security -i
 printf '{"oauthAccount":{"emailAddress":"%s"}}' "$STUB_LOGIN_EMAIL" >"$CLAUDE_CONFIG_DIR/.claude.json"
 STUB
-chmod +x "$work/bin/security" "$work/bin/tmux" "$work/bin/claude"
+cat >"$work/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+# curl stub: never touches the network. Usage answers from
+# $STUB_TMUX/usage-<access token>, token renewal from $STUB_TMUX/renew-<refresh
+# token>. Every argv is appended to $STUB_TMUX/curl-argv.
+printf '%s\n' "$*" >>"$STUB_TMUX/curl-argv"
+url="" hdr="" body=""
+while (( $# )); do
+  case "$1" in
+    -H) [[ "$2" == @* ]] && hdr=${2#@}; shift ;;
+    --data) body=${2#@}; shift ;;
+    http*) url=$1 ;;
+  esac
+  shift
+done
+case "$url" in
+  */usage) t=$(sed -n 's/^Authorization: Bearer //p' "$hdr"); echo "$t" >>"$STUB_TMUX/usage-calls"; cat "$STUB_TMUX/usage-$t" 2>/dev/null || exit 22 ;;
+  */token) rt=$(jq -r .refresh_token "$body"); echo "$rt" >>"$STUB_TMUX/renewed"; cat "$STUB_TMUX/renew-$rt" 2>/dev/null || exit 22 ;;
+  *) exit 7 ;;
+esac
+STUB
+export CLAUDE_ACCT_USAGE_URL=http://stub/usage CLAUDE_ACCT_TOKEN_URL=http://stub/token
+chmod +x "$work/bin/security" "$work/bin/tmux" "$work/bin/claude" "$work/bin/curl"
 export PATH="$work/bin:$PATH"
 
 # ============ helpers ============
@@ -305,6 +327,32 @@ if [[ "$raw" != *"bad;rm"* ]]; then ok "skips profile files with unsafe labels";
 loginlink=$'\033]8;;claude-acct://login\a+ login\033]8;;\a'
 first=$(printf '%s\n' "$raw" | head -1)
 if [[ "$first" == *"$loginlink" || "$first" == *"$loginlink"$'\033[0m' ]]; then ok "renders a + login link at the end of the first line"; else bad "+ login link" "$(printf '%s' "$first" | cat -v)"; fi
+
+# ============ refresh ============
+echo "refresh ..."
+login_as jay@example.com jay9
+future=$(( ($(date +%s) + 7200) * 1000 ))
+set_kc "$CLAUDE_ACCT_ACTIVE_SVC" jh "$(jq -c --argjson e "$future" '.claudeAiOauth.expiresAt = $e' <<<"$(cred jay9)")"
+printf '{"five_hour":{"utilization":33.0,"resets_at":"2026-10-11T01:20:00.08+00:00"},"seven_day":{"utilization":70.0,"resets_at":"2026-10-15T11:00:00.08+00:00"}}' >"$STUB_TMUX/usage-at-jay9"
+set_kc "$CLAUDE_ACCT_SLOT_SVC" INFO "$(cred info5)"   # expired access token
+printf '{"access_token":"at-info6","refresh_token":"rt-info6","expires_in":3600}' >"$STUB_TMUX/renew-rt-info5"
+printf '{"five_hour":{"utilization":4.0,"resets_at":null},"seven_day":{"utilization":12.0,"resets_at":"2026-10-14T09:00:00+00:00"}}' >"$STUB_TMUX/usage-at-info6"
+rm -f "$STUB_TMUX/renewed" "$STUB_TMUX/curl-argv"
+out=$("$acct" refresh 2>&1)
+r7=$(jq -n '"2026-10-15T11:00:00Z" | fromdateiso8601')
+if [[ "$(cat "$XDG_CACHE_HOME/claude-statusline/usage-jay@example.com")" == "33.0|$(jq -n '"2026-10-11T01:20:00Z" | fromdateiso8601')|70.0|$r7" ]]; then ok "refresh writes the active account's API numbers over its cache"; else bad "active refresh" "$out / $(cat "$XDG_CACHE_HOME/claude-statusline/usage-jay@example.com")"; fi
+if [[ "$(cat "$XDG_CACHE_HOME/claude-statusline/usage-info@example.com")" == "4.0||12.0|"* ]]; then ok "refresh renews an inactive account's expired token and reads its usage"; else bad "inactive refresh" "$out"; fi
+if [[ "$(jq -r '.claudeAiOauth | .accessToken + " " + .refreshToken' <<<"$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)")" == "at-info6 rt-info6" ]]; then ok "the renewed token is stored in the account's slot"; else bad "renewed slot" "$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)"; fi
+if ! grep -q 'at-\|rt-' "$STUB_TMUX/curl-argv"; then ok "tokens never appear in curl's argv"; else bad "token in argv" "$(cat "$STUB_TMUX/curl-argv")"; fi
+set_kc "$CLAUDE_ACCT_ACTIVE_SVC" jh "$(cred jay9)"   # active token expired
+rm -f "$STUB_TMUX/renewed" "$STUB_TMUX/usage-calls"
+"$acct" refresh >/dev/null 2>&1
+if ! grep -qx 'at-jay9' "$STUB_TMUX/usage-calls" 2>/dev/null; then ok "an expired access token is not sent to the usage API"; else bad "expired token used" "$(cat "$STUB_TMUX/usage-calls")"; fi
+if ! grep -q 'rt-jay9' "$STUB_TMUX/renewed" 2>/dev/null; then ok "never renews the active account's token, which running sessions hold"; else bad "renewed active" "$(cat "$STUB_TMUX/renewed")"; fi
+before=$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)
+set_kc "$CLAUDE_ACCT_SLOT_SVC" INFO "$(cred info7)"; before=$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)
+"$acct" refresh >/dev/null 2>&1
+if [[ "$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)" == "$before" ]]; then ok "a failed renewal leaves the slot untouched"; else bad "slot changed on failed renewal" "$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)"; fi
 
 printf '/dev/ttys000 clipboard,focus,title\n/dev/ttys001 clipboard,hyperlinks,title\n' >"$STUB_TMUX/clients"
 doc=$(TMUX=/tmp/stub,1,0 "$acct" doctor 2>&1)

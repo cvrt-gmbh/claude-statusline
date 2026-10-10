@@ -142,17 +142,27 @@ write_atomic() {
   fi
 }
 
-# is_newer RESET_A PCT_A RESET_B PCT_B -> 0 when window reading A is newer than B
-# A later reset means a later window; within one window usage only grows, so a
-# higher percentage is the more recent reading. A missing B always loses.
+# is_newer RESET_A PCT_A RESET_B PCT_B [NOW] -> 0 when reading A should replace
+# the stored reading B.
+#
+# While B's window is still running, only a reading of that SAME window (reset
+# within 5 minutes, the API jitters by a second) with a higher percentage
+# replaces it: within one window usage only grows. A reading with a different
+# reset belongs to another account, from a session that has not picked up an
+# account switch yet. Accepting it as "a later window" pinned JAY's 7d 10% on
+# INFO, whose real 7d was 70%, until INFO's week ended. Once B's window is over
+# (or B is missing), a reading of a later window replaces it.
 is_newer() {
-  awk -v ra="$1" -v pa="$2" -v rb="$3" -v pb="$4" 'BEGIN {
+  local now=${5:-}
+  [[ -n "$now" ]] || now=$(date +%s)
+  awk -v ra="$1" -v pa="$2" -v rb="$3" -v pb="$4" -v now="$now" 'BEGIN {
     num = "^[0-9]+([.][0-9]+)?$"
     if (ra !~ num || pa !~ num) exit 1
     if (rb !~ num || pb !~ num) exit 0
-    if (ra + 0 > rb + 0) exit 0
-    if (ra + 0 == rb + 0 && pa + 0 > pb + 0) exit 0
-    exit 1
+    d = ra - rb; if (d < 0) d = -d
+    if (d <= 300) exit (pa + 0 > pb + 0) ? 0 : 1
+    if (rb + 0 > now + 0) exit 1
+    exit (ra + 0 > rb + 0) ? 0 : 1
   }' 2>/dev/null
 }
 
