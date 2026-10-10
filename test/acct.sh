@@ -262,19 +262,42 @@ rm -f "$STUB_TMUX/windows"
 "$acct" handle-url "claude-acct://login" >/dev/null 2>&1
 if grep -q -- "-n claude-login .*claude-acct' login" "$STUB_TMUX/windows" 2>/dev/null; then ok "a claude-acct://login link opens the login in a new tmux window"; else bad "login link" "$(cat "$STUB_TMUX/windows" 2>/dev/null)"; fi
 
-# ============ status line links ============
-echo "status line switch links ..."
-printf '4|%s|18|%s\n' "$(( $(date +%s) + 3600 ))" "$(( $(date +%s) + 9000 ))" >"$XDG_CACHE_HOME/claude-statusline/usage-info@example.com"
-raw=$(printf '{"model":{"display_name":"Opus"}}' | "$statusline" 2>/dev/null)
-link=$'\033]8;;claude-acct://use/INFO\aINFO 4%\033]8;;\a'
-if [[ "$raw" == *"$link"* ]]; then ok "renders a clickable link to the other saved account with its usage"; else bad "renders a clickable link to the other saved account with its usage" "$(printf '%s' "$raw" | cat -v)"; fi
-if [[ "$raw" != *"claude-acct://use/JAY"* ]]; then ok "does not link the active account"; else bad "does not link the active account" "$(printf '%s' "$raw" | cat -v)"; fi
+# ============ status line account table ============
+echo "status line account table ..."
+plain() { perl -pe 's/\e\[[0-9;]*m//g; s/\e\]8;;[^\a]*\a//g'; }
+cachedir="$XDG_CACHE_HOME/claude-statusline"
+in1h=$(( $(date +%s) + 3600 )) in2d=$(( $(date +%s) + 172800 ))
+# Every saved account except JAY and INFO is at 80%, so INFO decides the arrow.
+for f in "$XDG_CONFIG_HOME/claude-statusline/profiles"/*.json; do
+  e=$(jq -r .emailAddress "$f"); [[ "$e" == jay@example.com || "$e" == info@example.com ]] && continue
+  printf '80|%s|10|%s\n' "$in1h" "$in2d" >"$cachedir/usage-$e"
+done
+printf '4|%s|18|%s\n' "$in1h" "$in2d" >"$cachedir/usage-info@example.com"
+session() { printf '{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":8,"resets_at":%s}}}' "$1" "$in1h" "$in2d" | "$statusline" 2>/dev/null; }
+row() { printf '%s\n' "$1" | grep -a -- "$2"; }
+raw=$(session 60); txt=$(printf '%s' "$raw" | plain)
+if (( $(printf '%s\n' "$raw" | wc -l) == $(ls "$XDG_CONFIG_HOME/claude-statusline/profiles"/*.json | wc -l) + 1 )); then ok "prints one line per saved account under the model line"; else bad "one line per account" "$txt"; fi
+if [[ "$raw" == *$'\033]8;;claude-acct://use/INFO\aINFO\033]8;;\a'* ]]; then ok "links each other account's name to claude-acct://use/LABEL"; else bad "links other accounts" "$(printf '%s' "$raw" | cat -v)"; fi
+if [[ "$raw" != *"claude-acct://use/JAY"* && "$(row "$txt" ' JAY ')" == $'\xe2\x86\x92 JAY'*"5h  60%"* ]]; then ok "marks the active account with an arrow, unlinked, with this session's 5h"; else bad "active row" "$txt"; fi
+if [[ "$txt" != *"["* ]]; then ok "no brackets around any account name"; else bad "brackets" "$txt"; fi
+if ! printf '%s\n' "$txt" | grep -q '^[[:space:]]'; then ok "no line starts with whitespace, which Claude Code would trim"; else bad "leading whitespace" "$txt"; fi
+if [[ "$(row "$txt" ' INFO ')" == *"5h   4% ("*"7d  18%"* ]]; then ok "shows another account's cached 5h with countdown and 7d"; else bad "INFO row" "$txt"; fi
+cols=$(printf '%s\n' "$txt" | tail -n +2 | perl -CS -ne 'print index($_, " 5h "), " ", index($_, " 7d "), "\n"' | sort -u | wc -l)
+if (( cols == 1 )); then ok "aligns the 5h and 7d columns across all rows"; else bad "column alignment" "$txt"; fi
+if [[ "$(row "$txt" ' INFO ')" == $'\xe2\x87\x84'* ]] && (( $(printf '%s' "$txt" | grep -c $'\xe2\x87\x84') == 1 )); then ok "marks only the least used account with the switch arrow"; else bad "switch arrow" "$txt"; fi
+if (( $(session 2 | grep -c $'\xe2\x87\x84') == 0 )); then ok "no switch arrow when the active account is the least used"; else bad "arrow with active lowest" "$(session 2 | plain)"; fi
+printf '4|%s|100|%s\n' "$in1h" "$in2d" >"$cachedir/usage-info@example.com"
+if (( $(session 90 | grep -c $'\xe2\x87\x84') == 1 )) && [[ "$(row "$(session 90 | plain)" ' INFO ')" != $'\xe2\x87\x84'* ]]; then ok "never recommends an account whose 7d is used up"; else bad "7d exhausted recommended" "$(session 90 | plain)"; fi
+printf '97|%s|18|%s\n' "$(( $(date +%s) - 60 ))" "$in2d" >"$cachedir/usage-info@example.com"
+if [[ "$(row "$(session 60 | plain)" ' INFO ')" == *"5h   0% "* ]]; then ok "an elapsed 5h window shows as 0%"; else bad "elapsed window" "$(session 60 | plain)"; fi
+rm -f "$cachedir/usage-info@example.com"
+if [[ "$(row "$(session 60 | plain)" ' INFO ')" == *"5h    - "*"7d    -"* ]]; then ok "an account never used shows - for both windows"; else bad "unknown usage" "$(session 60 | plain)"; fi
 printf '{"bogus": true}' >"$XDG_CONFIG_HOME/claude-statusline/profiles/bad;rm.json"
-raw=$(printf '{"model":{"display_name":"Opus"}}' | "$statusline" 2>/dev/null)
+raw=$(session 60)
 if [[ "$raw" != *"bad;rm"* ]]; then ok "skips profile files with unsafe labels"; else bad "skips profile files with unsafe labels" "$(printf '%s' "$raw" | cat -v)"; fi
-
 loginlink=$'\033]8;;claude-acct://login\a+ login\033]8;;\a'
-if [[ "$raw" == *"$loginlink" || "$raw" == *"$loginlink"$'\033[0m' ]]; then ok "renders a + login link at the end of the line"; else bad "+ login link" "$(printf '%s' "$raw" | cat -v)"; fi
+first=$(printf '%s\n' "$raw" | head -1)
+if [[ "$first" == *"$loginlink" || "$first" == *"$loginlink"$'\033[0m' ]]; then ok "renders a + login link at the end of the first line"; else bad "+ login link" "$(printf '%s' "$first" | cat -v)"; fi
 
 printf '/dev/ttys000 clipboard,focus,title\n/dev/ttys001 clipboard,hyperlinks,title\n' >"$STUB_TMUX/clients"
 doc=$(TMUX=/tmp/stub,1,0 "$acct" doctor 2>&1)

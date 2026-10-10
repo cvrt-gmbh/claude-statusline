@@ -228,40 +228,121 @@ usage_sync() {
   printf '%s' "$five|$five_reset|$seven|$seven_reset"
 }
 
-# switch_links CURRENT_LABEL -> "⇄ INFO 98% DEV 3%", one clickable OSC 8 link
-# per account saved with claude-acct other than the active one, colored by that
-# account's last known 5h usage. Cmd+click opens claude-acct://use/LABEL, which
-# the ClaudeAcct handler app turns into `claude-acct use LABEL`.
-switch_links() {
-  local cur=$1
+# account_rows ACTIVE_LABEL FIVE FIVE_RESET SEVEN SEVEN_RESET -> one line per
+# account saved with claude-acct, in aligned columns:
+#
+#   ⇄ DEV   5h   0%            7d   0%
+#     INFO  5h  12% (4h 10m)   7d  49%
+#   → JAY   5h  90% (3h 5m)    7d   8%
+#
+# The first column marks the active account (→) and the one to switch to (⇄).
+# Claude Code trims leading whitespace from every status line, so an unmarked
+# row starts with U+2800 (braille blank): invisible, one cell wide, and not
+# whitespace, which keeps the columns aligned.
+#
+# The active account shows this session's synced numbers, the
+# others their per-account cache. An elapsed window counts as 0%, an account
+# never used shows "-". Every other account's name is a clickable OSC 8 link to
+# claude-acct://use/LABEL. ⇄ marks the account to switch to: the lowest 5h
+# among the others that still have 5h and 7d left (unknown counts as unused),
+# and only when it is lower than the active account's 5h.
+# Returns 1 when no profiles are saved, so the caller keeps the one-line layout.
+account_rows() {
+  local cur=$1 cur_five=$2 cur_five_reset=$3 cur_seven=$4 cur_seven_reset=$5
   local config="${XDG_CONFIG_HOME:-$HOME/.config}/claude-statusline"
   local cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
-  [[ -d "$config/profiles" ]] || return 0
-  local now f l email text color pct p_five p_reset out=""
+  [[ -d "$config/profiles" ]] || return 1
+
+  local now
   now=$(date +%s)
+  is_uint "$now" || now=0
+
+  # Parallel arrays (bash 3.2 has no associative arrays).
+  local labels=() fives=() resets=() sevens=() active=-1
+  local f l email p5 p5r p7 p7r found=0
   for f in "$config/profiles"/*.json; do
     [[ -f "$f" ]] || continue
     l=$(basename "$f" .json)
-    [[ "$l" == "$cur" ]] && continue
     [[ $l =~ ^[A-Za-z0-9_-]{1,32}$ ]] || continue
-    text=$l color=$C_DIM
-    email=$(jq -r '.emailAddress // empty' "$f" 2>/dev/null) || email=""
-    if [[ -n "$email" && -f "$cache/usage-$email" ]]; then
-      IFS='|' read -r p_five p_reset _ <"$cache/usage-$email" || true
-      if is_uint "$p_reset" && is_uint "$now" && (( p_reset <= now )); then
-        pct=0
-      else
-        pct=$(round_pct "$p_five") || pct=""
+    labels+=("$l")
+    if [[ "$l" == "$cur" ]]; then
+      active=$(( ${#labels[@]} - 1 )); found=1
+      p5=$cur_five p5r=$cur_five_reset p7=$cur_seven p7r=$cur_seven_reset
+    else
+      p5="" p5r="" p7="" p7r=""
+      email=$(jq -r '.emailAddress // empty' "$f" 2>/dev/null) || email=""
+      email=$(printf '%s' "$email" | tr -c 'A-Za-z0-9._@-' '_')
+      if [[ -n "$email" && -f "$cache/usage-$email" ]]; then
+        IFS='|' read -r p5 p5r p7 p7r <"$cache/usage-$email" || true
       fi
-      if [[ -n "$pct" ]]; then
-        text="$l ${pct}%"
-        color=$(color_for_pct "$pct" 50 90)
-      fi
+      if is_uint "$p5r" && (( p5r <= now )); then p5=0; p5r=""; fi
+      if is_uint "$p7r" && (( p7r <= now )); then p7=0; p7r=""; fi
     fi
-    out+="${color}"$'\033]8;;'"claude-acct://use/${l}"$'\a'"${text}"$'\033]8;;\a'"${C_RESET} "
+    p5=$(round_pct "$p5") || p5=""
+    p7=$(round_pct "$p7") || p7=""
+    fives+=("$p5"); resets+=("$p5r"); sevens+=("$p7")
   done
-  [[ -n "$out" ]] && printf '%s' "${C_DIM}⇄${C_RESET} ${out% }"
-  return 0
+  (( ${#labels[@]} > 0 )) || return 1
+  # Active account not saved (or unmapped): still list it, first.
+  if (( ! found )); then
+    local name=$cur
+    [[ "$cur" == "$NO_LABEL" ]] && name="?"
+    p5=$(round_pct "$cur_five") || p5=""
+    p7=$(round_pct "$cur_seven") || p7=""
+    labels=("$name" "${labels[@]}"); fives=("$p5" "${fives[@]}")
+    resets=("$cur_five_reset" "${resets[@]}"); sevens=("$p7" "${sevens[@]}")
+    active=0
+  fi
+
+  # Recommendation.
+  local i best=-1 best5=0 best7=0 e5 e7
+  for i in "${!labels[@]}"; do
+    (( i == active )) && continue
+    e5=${fives[i]:-0} e7=${sevens[i]:-0}
+    (( e5 >= 100 || e7 >= 100 )) && continue
+    if (( best < 0 || e5 < best5 || (e5 == best5 && e7 < best7) )); then
+      best=$i best5=$e5 best7=$e7
+    fi
+  done
+  if (( best >= 0 )); then
+    local a5=${fives[active]:-}
+    if ! is_uint "$a5" || (( best5 >= a5 )); then best=-1; fi
+  fi
+
+  # Column widths.
+  local namew=0 cdw=0 n cds=() cd
+  for i in "${!labels[@]}"; do
+    n=${#labels[i]}
+    (( n > namew )) && namew=$n
+    cd=""
+    if is_uint "${resets[i]}" && (( resets[i] > now )) && [[ -n "${fives[i]}" ]]; then
+      cd="($(format_duration $(( resets[i] - now ))))"
+    fi
+    cds+=("$cd")
+    (( ${#cd} > cdw )) && cdw=${#cd}
+  done
+
+  local name pad c5 c7 v5 v7 mark row out=""
+  for i in "${!labels[@]}"; do
+    name=${labels[i]}
+    pad=$(printf '%*s' $(( namew - ${#name} )) '')
+    if [[ -n "${fives[i]}" ]]; then v5="${fives[i]}%"; c5=$(color_for_pct "${fives[i]}" 50 90)
+    else v5="-"; c5=$C_DIM; fi
+    if [[ -n "${sevens[i]}" ]]; then v7="${sevens[i]}%"; c7=$(color_for_pct "${sevens[i]}" 50 90)
+    else v7="-"; c7=$C_DIM; fi
+    if (( i == best )); then mark="${C_GREEN}"$'\xe2\x87\x84'"${C_RESET}"
+    elif (( i == active )); then mark="${c5}"$'\xe2\x86\x92'"${C_RESET}"
+    else mark=$'\xe2\xa0\x80'
+    fi
+    if (( i == active )); then
+      row="${c5}${name}${C_RESET}"
+    else
+      row="${c5}"$'\033]8;;'"claude-acct://use/${labels[i]}"$'\a'"${name}"$'\033]8;;\a'"${C_RESET}"
+    fi
+    row="${mark} ${row}${pad}  ${c5}5h $(printf '%4s %-*s' "$v5" "$cdw" "${cds[i]}")${C_RESET}  ${c7}7d $(printf '%4s' "$v7")${C_RESET}"
+    out+="${row}"$'\n'
+  done
+  printf '%s' "$out"
 }
 
 render() {
@@ -324,26 +405,25 @@ render() {
   local five_pct=""
   five_pct=$(round_pct "$five_raw") || five_pct=""
 
-  # Widget 1: account tag. Colored by 5h usage when known, so the tag itself
-  # carries the usage signal even before you read the numbers.
-  local label tag_color="$C_DIM"
+  # Widget 1: account table, one line per saved account (see account_rows).
+  # Without saved profiles: an account tag colored by 5h usage, so the tag
+  # itself carries the usage signal even before you read the numbers.
+  local label tag_color="$C_DIM" rows=""
   label=$(account_label "$email")
-  if [[ -n "$five_pct" ]]; then
-    tag_color=$(color_for_pct "$five_pct" 50 90)
+  rows=$(account_rows "$label" "$five_raw" "$five_reset" "$seven_raw" "$seven_reset") || rows=""
+  if [[ -z "$rows" ]]; then
+    if [[ -n "$five_pct" ]]; then
+      tag_color=$(color_for_pct "$five_pct" 50 90)
+    fi
+    if [[ "$label" == "$NO_LABEL" ]]; then
+      # Unmapped account: still show usage color when available. Grey only when
+      # there is genuinely nothing to report.
+      [[ -n "$five_pct" ]] || tag_color="$C_GREY"
+      segments+=("${tag_color}[?]${C_RESET}")
+    else
+      segments+=("${tag_color}[${label}]${C_RESET}")
+    fi
   fi
-  if [[ "$label" == "$NO_LABEL" ]]; then
-    # Unmapped account: still show usage color when available. Grey only when
-    # there is genuinely nothing to report.
-    [[ -n "$five_pct" ]] || tag_color="$C_GREY"
-    segments+=("${tag_color}[?]${C_RESET}")
-  else
-    segments+=("${tag_color}[${label}]${C_RESET}")
-  fi
-
-  # Widget 1b: links to switch to the other saved accounts.
-  local switch
-  switch=$(switch_links "$label") || switch=""
-  [[ -n "$switch" ]] && segments+=("$switch")
 
   # Widget 2: model (dim).
   segments+=("${C_DIM}${model:-Claude}${C_RESET}")
@@ -355,7 +435,8 @@ render() {
   fi
 
   # Widget 4: 5h window, with countdown to reset when it is still in the future.
-  if [[ -n "$five_pct" ]]; then
+  # The account table already shows it per account.
+  if [[ -z "$rows" && -n "$five_pct" ]]; then
     local five_color countdown=""
     five_color=$(color_for_pct "$five_pct" 50 90)
     if is_uint "$five_reset"; then
@@ -373,7 +454,7 @@ render() {
 
   # Widget 5: 7d window.
   local seven_pct
-  if seven_pct=$(round_pct "$seven_raw"); then
+  if [[ -z "$rows" ]] && seven_pct=$(round_pct "$seven_raw"); then
     segments+=("$(color_for_pct "$seven_pct" 50 90)7d ${seven_pct}%${C_RESET}")
   fi
 
@@ -397,6 +478,8 @@ render() {
     fi
   done
   printf '%s\n' "$out"
+  [[ -n "$rows" ]] && printf '%s' "$rows"
+  return 0
 }
 
 main() {

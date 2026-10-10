@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Account table: with saved `claude-acct` profiles, the status bar lists each
+  account on its own line with aligned 5h/7d columns, `→` on the active account
+  and `⇄` on the least used account that still has 5h and 7d left. Replaces the
+  inline `⇄ INFO 98%` links.
+- `claude-acct doctor` checks each attached tmux client for hyperlinks, not
+  only the config: a client keeps the features it had when it attached.
 - `claude-acct`: switch the Claude Code login of every open session at once
   (`save`, `use`, `list`, `nudge`, `doctor`), without the logout gap that kills
   in-flight requests. Banks the rotated credential of the account it leaves,
