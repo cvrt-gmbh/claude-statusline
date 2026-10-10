@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clickable account switch in the status line: the other saved accounts render
   as OSC 8 `claude-acct://use/LABEL` links with their last known 5h usage,
   handled by `~/Applications/ClaudeAcct.app` (`claude-acct install-handler`).
+- `claude-acct login` and a `+ login` link at the end of the status line: log in
+  to another account in an isolated `CLAUDE_CONFIG_DIR` and save it, without
+  touching the open sessions.
 
 - 5h and 7d usage are shared across all open sessions of the same account via
   `~/.cache/claude-statusline/usage-<email>`. Previously each tab showed the

@@ -116,7 +116,8 @@ without a login, which otherwise kills in-flight requests and subagents with
 
 ```bash
 ln -s "$PWD/claude-acct" ~/.local/bin/claude-acct
-claude-acct save            # once per account: log in as it, then save
+claude-acct save            # save the account that is logged in now
+claude-acct login           # log in to another account and save it; open sessions stay put
 claude-acct install-handler # builds ~/Applications/ClaudeAcct.app for claude-acct:// links
 claude-acct use INFO        # switch every session to INFO
 claude-acct list            # saved accounts and their last known usage
@@ -125,6 +126,15 @@ claude-acct doctor          # checks the setup, never prints secrets
 
 Once two or more accounts are saved, the status line shows the other ones after
 the account tag, colored by their last known 5h usage. Cmd+click one to switch.
+A `+ login` link at the end of the line opens `claude-acct login` in a new tmux
+window (or a new Ghostty window without tmux).
+
+`claude-acct login` runs `claude auth login` with a temporary
+`CLAUDE_CONFIG_DIR`, which gets its own credential store, so the open sessions
+keep their account during the login. It saves the new account (asking for a
+label if its email is not in `accounts.toml` yet), deletes the temporary login,
+and offers to switch. If the login ever lands in the live credential store
+instead, it stops and says so, and never deletes that credential.
 For the links to be clickable:
 
 - the terminal must support OSC 8 links (Ghostty, iTerm2, Kitty, WezTerm),

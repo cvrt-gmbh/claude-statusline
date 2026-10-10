@@ -7,6 +7,7 @@
 # subagents ("Not logged in · Please run /login").
 #
 #   claude-acct save [LABEL]     remember the account that is logged in now
+#   claude-acct login [EMAIL]    log in to another account and save it, open sessions untouched
 #   claude-acct use LABEL        switch every session to LABEL, then nudge
 #   claude-acct list             saved accounts, active one, cached usage
 #   claude-acct nudge [--dry-run] send "continue" to sessions stopped by a limit
@@ -114,6 +115,18 @@ kc_write() {
 
 # ============ commands ============
 
+# store_account LABEL BLOB OAUTH_FILE -> credential into the label's keychain
+# slot, non-secret account details into its profile (mode 600)
+store_account() {
+  local label=$1 blob=$2 oauth=$3
+  jq -e '.claudeAiOauth.refreshToken | length > 0' >/dev/null 2>&1 <<<"$blob" \
+    || die "the credential has no refresh token; log in again"
+  kc_write "$SLOT_SVC" "$label" "$blob" || die "could not store $label in the keychain"
+  mkdir -p "$PROFILES_DIR" && chmod 700 "$PROFILES_DIR"
+  (umask 077 && jq '.oauthAccount' "$oauth" >"$PROFILES_DIR/$label.json") \
+    || die "could not write profile for $label"
+}
+
 cmd_save() {
   local email label blob acct
   email=$(current_email)
@@ -125,15 +138,95 @@ cmd_save() {
   acct=$(kc_account "$ACTIVE_SVC")
   [[ -n "$acct" ]] || die "no '$ACTIVE_SVC' keychain item: log in to Claude Code first"
   blob=$(kc_read "$ACTIVE_SVC" "$acct")
-  jq -e '.claudeAiOauth.refreshToken | length > 0' >/dev/null 2>&1 <<<"$blob" \
-    || die "the active credential has no refresh token; log in again"
-
-  kc_write "$SLOT_SVC" "$label" "$blob" || die "could not store $label in the keychain"
-  mkdir -p "$PROFILES_DIR" && chmod 700 "$PROFILES_DIR"
-  (umask 077 && jq '.oauthAccount' "$CLAUDE_JSON" >"$PROFILES_DIR/$label.json") \
-    || die "could not write profile for $label"
+  store_account "$label" "$blob" "$CLAUDE_JSON"
   log "save $label ($email)"
   printf 'saved %s (%s)\n' "$label" "$email"
+}
+
+# kc_claude_services -> every Claude Code credential service in the keychain.
+# Attributes only: dump-keychain without -d prints no secrets.
+kc_claude_services() {
+  security dump-keychain 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"svce"<blob>="\(Claude Code-credentials[^"]*\)"$/\1/p' | sort -u
+}
+
+# cmd_login [EMAIL] -> log in to another account and save it, WITHOUT touching
+# the open sessions: the login runs with its own CLAUDE_CONFIG_DIR, which gets
+# its own credential store. The temporary login is deleted afterwards.
+cmd_login() {
+  local email=${1:-}
+  command -v claude >/dev/null 2>&1 || die "claude CLI not found"
+  mkdir -p "$CACHE_DIR" || die "cannot create $CACHE_DIR"
+  local dir
+  dir=$(mktemp -d "$CACHE_DIR/login.XXXXXX") || die "cannot create a temporary config dir"
+  chmod 700 "$dir"
+
+  local before after svc="" acct="" blob="" new_email label args=(auth login)
+  [[ -n "$email" ]] && args+=(--email "$email")
+  before=$(kc_claude_services)
+  printf 'Logging in to another account. Open sessions stay on their current one.\n\n'
+  if ! CLAUDE_CONFIG_DIR="$dir" claude "${args[@]}"; then
+    rm -rf "$dir"
+    die "login cancelled or failed"
+  fi
+
+  after=$(kc_claude_services)
+  svc=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)
+  if [[ "$svc" == "$ACTIVE_SVC" ]]; then
+    # The login landed in the live store: isolation did not hold. Never
+    # delete or overwrite it here; that would log every session out.
+    rm -rf "$dir"
+    die "the login replaced the ACTIVE credential (isolation failed); open sessions now use it"
+  fi
+  if [[ -n "$svc" ]]; then
+    acct=$(kc_account "$svc")
+    blob=$(kc_read "$svc" "$acct")
+  elif [[ -f "$dir/.credentials.json" ]]; then
+    blob=$(cat "$dir/.credentials.json")
+  fi
+  cleanup_login() {
+    [[ -n "$svc" && "$svc" != "$ACTIVE_SVC" ]] && security delete-generic-password -a "$acct" -s "$svc" >/dev/null 2>&1
+    rm -rf "$dir"
+  }
+
+  new_email=$(jq -r '.oauthAccount.emailAddress // empty' "$dir/.claude.json" 2>/dev/null)
+  if [[ -z "$blob" || -z "$new_email" ]]; then
+    cleanup_login
+    die "login finished but no credential or account details were found"
+  fi
+
+  label=$(label_for_email "$new_email")
+  if [[ -z "$label" ]]; then
+    read -r -p "Short label for $new_email (letters/digits, e.g. DEV): " label || label=""
+    if ! valid_label "$label"; then cleanup_login; die "invalid label '$label'"; fi
+    printf '\n[[account]]\nemail = "%s"\nlabel = "%s"\n' "$new_email" "$label" >>"$CONFIG_DIR/accounts.toml"
+  fi
+
+  store_account "$label" "$blob" "$dir/.claude.json"
+  cleanup_login
+  log "login $label ($new_email)"
+  printf 'saved %s (%s)\n' "$label" "$new_email"
+
+  local answer=""
+  read -r -p "Switch all sessions to $label now? [y/N] " answer || answer=""
+  [[ "$answer" == [yY]* ]] && cmd_use "$label"
+  return 0
+}
+
+# cmd_open_login -> run `claude-acct login` where the user can see it: a new
+# tmux window, or a new Ghostty window when no tmux server is running.
+cmd_open_login() {
+  local self run
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  run="'$self' login; printf '\\nPress Enter to close. '; read -r _"
+  if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+    tmux new-window -n claude-login "$run" || die "could not open a tmux window"
+  elif [[ "$(uname)" == Darwin ]]; then
+    open -na Ghostty --args -e /bin/zsh -c "$run" || die "could not open a terminal window"
+  else
+    die "no tmux session to open the login in; run 'claude-acct login'"
+  fi
+  log "open login window"
 }
 
 # set_oauth_account PROFILE -> replace .oauthAccount in ~/.claude.json atomically,
@@ -274,6 +367,7 @@ cmd_list() {
 cmd_handle_url() {
   local url=${1:-} label
   case "$url" in
+    "$URL_SCHEME://login" | "$URL_SCHEME://login/") log "link $url"; cmd_open_login; return ;;
     "$URL_SCHEME://use/"*) label=${url#"$URL_SCHEME://use/"}; label=${label%/} ;;
     *) die "unsupported link: $url" ;;
   esac
@@ -337,13 +431,14 @@ main() {
   shift || true
   case "$cmd" in
     save) cmd_save "$@" ;;
+    login) cmd_login "$@" ;;
     use) cmd_use "$@" ;;
     list) cmd_list ;;
     nudge) cmd_nudge "$@" ;;
     handle-url) cmd_handle_url "$@" ;;
     install-handler) cmd_install_handler ;;
     doctor) cmd_doctor ;;
-    *) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 1 ;;
+    *) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 1 ;;
   esac
 }
 

@@ -382,6 +382,12 @@ render() {
   branch=$(git_branch "$cwd")
   [[ -n "$branch" ]] && segments+=("${C_DIM}${branch}${C_RESET}")
 
+  # Widget 7: "+ login" link (last, so it sits at the right end of the line).
+  # Opens `claude-acct login` in a new window; shown once claude-acct is in use.
+  if [[ -d "${XDG_CONFIG_HOME:-$HOME/.config}/claude-statusline/profiles" ]]; then
+    segments+=("${C_DIM}"$'\033]8;;claude-acct://login\a+ login\033]8;;\a'"${C_RESET}")
+  fi
+
   # Join with " · ".
   local sep=$' \xc2\xb7 '
   local out="" i

@@ -52,8 +52,13 @@ run() {
     add-generic-password)
       [[ -n "$x" ]] && w=$(printf '%s' "$x" | xxd -r -p 2>/dev/null || printf '%s' "$x" | perl -pe 's/(..)/chr(hex($1))/ge')
       printf '%s' "$w" >"$STUB_KC/$(key "$s" "$a")"
+      printf '%s\t%s\n' "$s" "$a" >>"$STUB_KC/.index"
       [[ -n "$x" ]] && echo stdin >>"$STUB_KC/.writes" || echo argv >>"$STUB_KC/.writes" ;;
     delete-generic-password) rm -f "$STUB_KC/$(key "$s" "$a")" ;;
+    dump-keychain)
+      sort -u "$STUB_KC/.index" 2>/dev/null | while IFS=$'\t' read -r sv ac; do
+        [[ -f "$STUB_KC/$(key "$sv" "$ac")" ]] && printf '    "svce"<blob>="%s"\n' "$sv"
+      done ;;
   esac
 }
 if [[ "$1" == -i ]]; then
@@ -71,10 +76,25 @@ case "$1" in
   list-panes) cat "$STUB_TMUX/panes" ;;
   capture-pane) shift; while (( $# )); do [[ "$1" == -t ]] && id=$2; shift; done; cat "$STUB_TMUX/$id.screen" ;;
   send-keys) shift; echo "$*" >>"$STUB_TMUX/sent" ;;
+  list-sessions) echo "main: 1 windows" ;;
+  new-window) shift; printf '%s\n' "$*" >>"$STUB_TMUX/windows" ;;
   show) echo "" ;;
 esac
 STUB
-chmod +x "$work/bin/security" "$work/bin/tmux"
+cat >"$work/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+# `claude auth login` stub: writes an isolated credential the way Claude Code
+# does for a custom CLAUDE_CONFIG_DIR, or the live one when STUB_LOGIN_LEAK=1.
+[[ "$1 $2" == "auth login" ]] || exit 2
+[[ "${STUB_LOGIN_FAIL:-0}" == 1 ]] && exit 1
+svc="Claude Code-credentials-${STUB_LOGIN_SUFFIX:-1a2b3c4d}"
+[[ "${STUB_LOGIN_LEAK:-0}" == 1 ]] && svc="Claude Code-credentials"
+printf 'add-generic-password -U -a "jh" -s "%s" -w %s\n' "$svc" \
+  "$(printf '{"claudeAiOauth":{"refreshToken":"rt-%s"}}' "$STUB_LOGIN_EMAIL" | sed 's/"/\\"/g; s/^/"/; s/$/"/')" \
+  | security -i
+printf '{"oauthAccount":{"emailAddress":"%s"}}' "$STUB_LOGIN_EMAIL" >"$CLAUDE_CONFIG_DIR/.claude.json"
+STUB
+chmod +x "$work/bin/security" "$work/bin/tmux" "$work/bin/claude"
 export PATH="$work/bin:$PATH"
 
 # ============ helpers ============
@@ -202,6 +222,45 @@ rm -f "$STUB_TMUX/sent"
 "$acct" use JAY >/dev/null 2>&1
 if [[ "$(cat "$STUB_TMUX/sent" 2>/dev/null)" == *"-t %1 -l continue"* ]]; then ok "use nudges stopped sessions after switching"; else bad "use nudges stopped sessions after switching" ""; fi
 
+
+# ============ login ============
+echo "login ..."
+cat >>"$XDG_CONFIG_HOME/claude-statusline/accounts.toml" <<'TOML'
+
+[[account]]
+email = "dev@example.com"
+label = "DEV"
+TOML
+active_before=$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)
+email_before=$(jq -r .oauthAccount.emailAddress "$HOME/.claude.json")
+out=$(printf 'n\n' | STUB_LOGIN_EMAIL=dev@example.com "$acct" login 2>&1); rc=$?
+if (( rc == 0 )) && [[ "$out" == *"saved DEV (dev@example.com)"* ]]; then ok "login saves the new account under its mapped label"; else bad "login saves the new account" "$out"; fi
+if [[ "$(kc "$CLAUDE_ACCT_SLOT_SVC" DEV)" == *"rt-dev@example.com"* ]]; then ok "login stores the new credential in the slot"; else bad "login stores the credential" "$(kc "$CLAUDE_ACCT_SLOT_SVC" DEV)"; fi
+if [[ "$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)" == "$active_before" && "$(jq -r .oauthAccount.emailAddress "$HOME/.claude.json")" == "$email_before" ]]; then
+  ok "login leaves the open sessions' account untouched"; else bad "login touched the active account" "$(jq -r .oauthAccount.emailAddress "$HOME/.claude.json")"; fi
+if [[ -z "$(kc "Claude Code-credentials-1a2b3c4d" jh)" ]]; then ok "login deletes its temporary credential"; else bad "temporary credential left behind" ""; fi
+if ! ls -d "$XDG_CACHE_HOME"/claude-statusline/login.* >/dev/null 2>&1; then ok "login removes its temporary config dir"; else bad "temporary config dir left behind" "$(ls -d "$XDG_CACHE_HOME"/claude-statusline/login.*)"; fi
+
+out=$(printf 'NEWONE\ny\n' | STUB_LOGIN_EMAIL=new@example.com STUB_LOGIN_SUFFIX=99 "$acct" login 2>&1); rc=$?
+if (( rc == 0 )) && grep -q 'email = "new@example.com"' "$XDG_CONFIG_HOME/claude-statusline/accounts.toml" && [[ -f "$XDG_CONFIG_HOME/claude-statusline/profiles/NEWONE.json" ]]; then
+  ok "login asks for a label for an unmapped email and records it"; else bad "unmapped email login" "$out"; fi
+if [[ "$(jq -r .oauthAccount.emailAddress "$HOME/.claude.json")" == new@example.com ]]; then ok "answering y switches every session to the new account"; else bad "y should switch" "$(jq -r .oauthAccount.emailAddress "$HOME/.claude.json")"; fi
+"$acct" use JAY --no-nudge >/dev/null 2>&1
+
+active_before=$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)
+out=$(printf 'n\n' | STUB_LOGIN_EMAIL=dev@example.com STUB_LOGIN_FAIL=1 "$acct" login 2>&1); rc=$?
+if (( rc == 1 )) && [[ "$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)" == "$active_before" ]]; then ok "a failed login changes nothing"; else bad "failed login" "$out"; fi
+
+rm -f "$STUB_KC/$(printf '%s__%s' "$CLAUDE_ACCT_ACTIVE_SVC" jh | tr ' /' '__')"
+out=$(printf 'n\n' | STUB_LOGIN_EMAIL=dev@example.com STUB_LOGIN_LEAK=1 "$acct" login 2>&1); rc=$?
+if (( rc == 1 )) && [[ "$out" == *"isolation failed"* && -n "$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)" ]]; then
+  ok "a login that lands in the live store is reported and never deleted"; else bad "isolation failure handling" "$out"; fi
+set_kc "$CLAUDE_ACCT_ACTIVE_SVC" jh "$active_before"
+
+rm -f "$STUB_TMUX/windows"
+"$acct" handle-url "claude-acct://login" >/dev/null 2>&1
+if grep -q -- "-n claude-login .*claude-acct' login" "$STUB_TMUX/windows" 2>/dev/null; then ok "a claude-acct://login link opens the login in a new tmux window"; else bad "login link" "$(cat "$STUB_TMUX/windows" 2>/dev/null)"; fi
+
 # ============ status line links ============
 echo "status line switch links ..."
 printf '4|%s|18|%s\n' "$(( $(date +%s) + 3600 ))" "$(( $(date +%s) + 9000 ))" >"$XDG_CACHE_HOME/claude-statusline/usage-info@example.com"
@@ -212,6 +271,9 @@ if [[ "$raw" != *"claude-acct://use/JAY"* ]]; then ok "does not link the active 
 printf '{"bogus": true}' >"$XDG_CONFIG_HOME/claude-statusline/profiles/bad;rm.json"
 raw=$(printf '{"model":{"display_name":"Opus"}}' | "$statusline" 2>/dev/null)
 if [[ "$raw" != *"bad;rm"* ]]; then ok "skips profile files with unsafe labels"; else bad "skips profile files with unsafe labels" "$(printf '%s' "$raw" | cat -v)"; fi
+
+loginlink=$'\033]8;;claude-acct://login\a+ login\033]8;;\a'
+if [[ "$raw" == *"$loginlink" || "$raw" == *"$loginlink"$'\033[0m' ]]; then ok "renders a + login link at the end of the line"; else bad "+ login link" "$(printf '%s' "$raw" | cat -v)"; fi
 
 echo
 echo "Passed: $pass  Failed: $fail"
