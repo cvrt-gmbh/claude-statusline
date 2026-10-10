@@ -15,12 +15,12 @@ Built for Claude Max / Team Max plans where dollar amounts and burn-rate are mea
 - 5-hour rate-limit usage + countdown to reset
 - 7-day rate-limit usage
 - Usage shared across all open sessions of the same account, so idle tabs never show stale 5h/7d numbers
-- Account table once accounts are saved with `claude-acct`: one aligned line per account with its 5h and 7d usage. `→` marks the active account, `⇄` the least used one worth switching to. Cmd+click a name to move every open session to that account at once (macOS):
+- Account table once accounts are saved with `claude-acct`: one aligned line per account with its 5h and 7d usage. `→` marks the active account, `⇄` the least used one worth switching to. Green means room left, yellow approaching a limit (from 50%), red used up; a name takes the color of its fuller window. Cmd+click a name to move every open session to that account at once (macOS):
 
   ```
-  ⇄ DEV   5h   -           7d   -
-    INFO  5h 100% (25m)    7d  49%
-  → JAY   5h  92% (2h 55m) 7d   8%
+    DEV   5h   0%           7d 100% (1h 40m)
+    INFO  5h 100% (20m)     7d  49% (4d 21h)
+  → JAY   5h  96% (2h 50m)  7d   9% (6d 22h)
   ```
 - Git branch for orientation
 - Graceful degradation when fields are missing (never blanks the bar)

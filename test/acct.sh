@@ -281,13 +281,19 @@ if [[ "$raw" == *$'\033]8;;claude-acct://use/INFO\aINFO\033]8;;\a'* ]]; then ok 
 if [[ "$raw" != *"claude-acct://use/JAY"* && "$(row "$txt" ' JAY ')" == $'\xe2\x86\x92 JAY'*"5h  60%"* ]]; then ok "marks the active account with an arrow, unlinked, with this session's 5h"; else bad "active row" "$txt"; fi
 if [[ "$txt" != *"["* ]]; then ok "no brackets around any account name"; else bad "brackets" "$txt"; fi
 if ! printf '%s\n' "$txt" | grep -q '^[[:space:]]'; then ok "no line starts with whitespace, which Claude Code would trim"; else bad "leading whitespace" "$txt"; fi
-if [[ "$(row "$txt" ' INFO ')" == *"5h   4% ("*"7d  18%"* ]]; then ok "shows another account's cached 5h with countdown and 7d"; else bad "INFO row" "$txt"; fi
+if [[ "$(row "$txt" ' INFO ')" == *"5h   4% ("*"7d  18% ("*"d "*"h)"* ]]; then ok "shows another account's cached 5h with countdown and 7d with its reset countdown in days"; else bad "INFO row" "$txt"; fi
 cols=$(printf '%s\n' "$txt" | tail -n +2 | perl -CS -ne 'print index($_, " 5h "), " ", index($_, " 7d "), "\n"' | sort -u | wc -l)
 if (( cols == 1 )); then ok "aligns the 5h and 7d columns across all rows"; else bad "column alignment" "$txt"; fi
 if [[ "$(row "$txt" ' INFO ')" == $'\xe2\x87\x84'* ]] && (( $(printf '%s' "$txt" | grep -c $'\xe2\x87\x84') == 1 )); then ok "marks only the least used account with the switch arrow"; else bad "switch arrow" "$txt"; fi
 if (( $(session 2 | grep -c $'\xe2\x87\x84') == 0 )); then ok "no switch arrow when the active account is the least used"; else bad "arrow with active lowest" "$(session 2 | plain)"; fi
 printf '4|%s|100|%s\n' "$in1h" "$in2d" >"$cachedir/usage-info@example.com"
 if (( $(session 90 | grep -c $'\xe2\x87\x84') == 1 )) && [[ "$(row "$(session 90 | plain)" ' INFO ')" != $'\xe2\x87\x84'* ]]; then ok "never recommends an account whose 7d is used up"; else bad "7d exhausted recommended" "$(session 90 | plain)"; fi
+printf '95|%s|60|%s\n' "$in1h" "$in2d" >"$cachedir/usage-info@example.com"
+r=$(row "$(session 60)" 'use/INFO')
+if [[ "$r" == *$'\033[33m5h  95%'* && "$r" == *$'\033[33m7d  60%'* && "$r" == *$'\033[33m\033]8;;claude-acct://use/INFO'* ]]; then ok "an account approaching its 5h or 7d limit shows yellow, red only at 100%"; else bad "approaching colors" "$(printf '%s' "$r" | cat -v)"; fi
+printf '0||100|%s\n' "$in2d" >"$cachedir/usage-info@example.com"
+r=$(row "$(session 60)" 'use/INFO')
+if [[ "$r" == *$'\033[31m\033]8;;claude-acct://use/INFO'* && "$r" == *$'\033[2m5h   0%'* ]]; then ok "an account with its 7d used up shows red, with its unused 5h dimmed"; else bad "blocked account colors" "$(printf '%s' "$r" | cat -v)"; fi
 printf '97|%s|18|%s\n' "$(( $(date +%s) - 60 ))" "$in2d" >"$cachedir/usage-info@example.com"
 if [[ "$(row "$(session 60 | plain)" ' INFO ')" == *"5h   0% "* ]]; then ok "an elapsed 5h window shows as 0%"; else bad "elapsed window" "$(session 60 | plain)"; fi
 rm -f "$cachedir/usage-info@example.com"

@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Account table: with saved `claude-acct` profiles, the status bar lists each
   account on its own line with aligned 5h/7d columns, `→` on the active account
   and `⇄` on the least used account that still has 5h and 7d left. Replaces the
-  inline `⇄ INFO 98%` links.
+  inline `⇄ INFO 98%` links. Both windows show their reset countdown (7d in
+  days); colors are green / yellow (from 50%) / red only at 100%, and an account
+  blocked by one window shows red with the other window dimmed.
 - `claude-acct doctor` checks each attached tmux client for hyperlinks, not
   only the config: a client keeps the features it had when it attached.
 - `claude-acct`: switch the Claude Code login of every open session at once

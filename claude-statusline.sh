@@ -64,14 +64,17 @@ color_for_pct() {
   fi
 }
 
-# format_duration SECONDS -> "Xh Ym" or "Mm"
+# format_duration SECONDS -> "Xd Yh", "Xh Ym" or "Mm"
 # Callers must not pass a non-positive value; an elapsed window has no
 # meaningful countdown and should omit it instead of claiming "0m".
 format_duration() {
   local secs=$1
+  local days=$(( secs / 86400 ))
   local hours=$(( secs / 3600 ))
   local mins=$(( (secs % 3600) / 60 ))
-  if (( hours > 0 )); then
+  if (( days > 0 )); then
+    printf '%dd %dh' "$days" "$(( (secs % 86400) / 3600 ))"
+  elif (( hours > 0 )); then
     printf '%dh %dm' "$hours" "$mins"
   else
     printf '%dm' "$mins"
@@ -232,8 +235,8 @@ usage_sync() {
 # account saved with claude-acct, in aligned columns:
 #
 #   ⇄ DEV   5h   0%            7d   0%
-#     INFO  5h  12% (4h 10m)   7d  49%
-#   → JAY   5h  90% (3h 5m)    7d   8%
+#     INFO  5h  12% (4h 10m)   7d  49% (3d 2h)
+#   → JAY   5h  90% (3h 5m)    7d   8% (6d 20h)
 #
 # The first column marks the active account (→) and the one to switch to (⇄).
 # Claude Code trims leading whitespace from every status line, so an unmarked
@@ -258,7 +261,7 @@ account_rows() {
   is_uint "$now" || now=0
 
   # Parallel arrays (bash 3.2 has no associative arrays).
-  local labels=() fives=() resets=() sevens=() active=-1
+  local labels=() fives=() resets=() sevens=() sresets=() active=-1
   local f l email p5 p5r p7 p7r found=0
   for f in "$config/profiles"/*.json; do
     [[ -f "$f" ]] || continue
@@ -280,7 +283,7 @@ account_rows() {
     fi
     p5=$(round_pct "$p5") || p5=""
     p7=$(round_pct "$p7") || p7=""
-    fives+=("$p5"); resets+=("$p5r"); sevens+=("$p7")
+    fives+=("$p5"); resets+=("$p5r"); sevens+=("$p7"); sresets+=("$p7r")
   done
   (( ${#labels[@]} > 0 )) || return 1
   # Active account not saved (or unmapped): still list it, first.
@@ -291,6 +294,7 @@ account_rows() {
     p7=$(round_pct "$cur_seven") || p7=""
     labels=("$name" "${labels[@]}"); fives=("$p5" "${fives[@]}")
     resets=("$cur_five_reset" "${resets[@]}"); sevens=("$p7" "${sevens[@]}")
+    sresets=("$cur_seven_reset" "${sresets[@]}")
     active=0
   fi
 
@@ -310,7 +314,7 @@ account_rows() {
   fi
 
   # Column widths.
-  local namew=0 cdw=0 n cds=() cd
+  local namew=0 cdw=0 n cds=() cd scds=()
   for i in "${!labels[@]}"; do
     n=${#labels[i]}
     (( n > namew )) && namew=$n
@@ -320,26 +324,45 @@ account_rows() {
     fi
     cds+=("$cd")
     (( ${#cd} > cdw )) && cdw=${#cd}
+    cd=""
+    if is_uint "${sresets[i]}" && (( sresets[i] > now )) && [[ -n "${sevens[i]}" ]]; then
+      cd=" ($(format_duration $(( sresets[i] - now ))))"
+    fi
+    scds+=("$cd")
   done
 
   local name pad c5 c7 v5 v7 mark row out=""
   for i in "${!labels[@]}"; do
     name=${labels[i]}
     pad=$(printf '%*s' $(( namew - ${#name} )) '')
-    if [[ -n "${fives[i]}" ]]; then v5="${fives[i]}%"; c5=$(color_for_pct "${fives[i]}" 50 90)
+    if [[ -n "${fives[i]}" ]]; then v5="${fives[i]}%"; c5=$(color_for_pct "${fives[i]}" 50 100)
     else v5="-"; c5=$C_DIM; fi
-    if [[ -n "${sevens[i]}" ]]; then v7="${sevens[i]}%"; c7=$(color_for_pct "${sevens[i]}" 50 90)
+    if [[ -n "${sevens[i]}" ]]; then v7="${sevens[i]}%"; c7=$(color_for_pct "${sevens[i]}" 50 100)
     else v7="-"; c7=$C_DIM; fi
+    # Green: room left. Yellow: from 50%, approaching the limit. Red: only at
+    # 100%, where the account cannot be used.
+    # The name carries the worse of both windows, so an account blocked by its
+    # 7d never looks green. On a blocked account the window with room left is
+    # dimmed: its percentage is not usable while the other one is full.
+    local worst=${fives[i]:-0}
+    (( ${sevens[i]:-0} > worst )) && worst=${sevens[i]}
+    local cn
+    cn=$(color_for_pct "$worst" 50 100)
+    [[ -n "${fives[i]}${sevens[i]}" ]] || cn=$C_DIM
+    if (( worst >= 100 )); then
+      (( ${fives[i]:-0} < 100 )) && c5=$C_DIM
+      (( ${sevens[i]:-0} < 100 )) && c7=$C_DIM
+    fi
     if (( i == best )); then mark="${C_GREEN}"$'\xe2\x87\x84'"${C_RESET}"
-    elif (( i == active )); then mark="${c5}"$'\xe2\x86\x92'"${C_RESET}"
+    elif (( i == active )); then mark="${cn}"$'\xe2\x86\x92'"${C_RESET}"
     else mark=$'\xe2\xa0\x80'
     fi
     if (( i == active )); then
-      row="${c5}${name}${C_RESET}"
+      row="${cn}${name}${C_RESET}"
     else
-      row="${c5}"$'\033]8;;'"claude-acct://use/${labels[i]}"$'\a'"${name}"$'\033]8;;\a'"${C_RESET}"
+      row="${cn}"$'\033]8;;'"claude-acct://use/${labels[i]}"$'\a'"${name}"$'\033]8;;\a'"${C_RESET}"
     fi
-    row="${mark} ${row}${pad}  ${c5}5h $(printf '%4s %-*s' "$v5" "$cdw" "${cds[i]}")${C_RESET}  ${c7}7d $(printf '%4s' "$v7")${C_RESET}"
+    row="${mark} ${row}${pad}  ${c5}5h $(printf '%4s %-*s' "$v5" "$cdw" "${cds[i]}")${C_RESET}  ${c7}7d $(printf '%4s' "$v7")${scds[i]}${C_RESET}"
     out+="${row}"$'\n'
   done
   printf '%s' "$out"
