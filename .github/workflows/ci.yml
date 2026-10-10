@@ -35,7 +35,7 @@ jobs:
         run: bash --version
 
       - name: Lint
-        run: shellcheck --shell=bash claude-statusline.sh install.sh test/run.sh
+        run: shellcheck --shell=bash claude-statusline.sh claude-acct install.sh test/run.sh test/acct.sh
 
       - name: Test
-        run: ./test/run.sh
+        run: ./test/run.sh && ./test/acct.sh

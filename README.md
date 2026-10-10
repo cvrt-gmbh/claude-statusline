@@ -15,6 +15,7 @@ Built for Claude Max / Team Max plans where dollar amounts and burn-rate are mea
 - 5-hour rate-limit usage + countdown to reset
 - 7-day rate-limit usage
 - Usage shared across all open sessions of the same account, so idle tabs never show stale 5h/7d numbers
+- Clickable account switch (`⇄ INFO 98% DEV 3%`) that moves every open session to another account at once (macOS)
 - Git branch for orientation
 - Graceful degradation when fields are missing (never blanks the bar)
 
@@ -105,17 +106,67 @@ label = "B"
 
 The script reads the current account from `~/.claude.json` (`.oauthAccount.emailAddress`) every tick. Logging out and back into a different account flips the label within one refresh (up to 5 seconds). Unmapped emails render as `[?]`.
 
+## Account switching (macOS)
+
+`claude-acct` switches the Claude Code login for every open session at once.
+Running sessions re-read the login from the macOS Keychain, so replacing the
+active credential is enough. Unlike `/logout` + `/login` there is no window
+without a login, which otherwise kills in-flight requests and subagents with
+`Not logged in · Please run /login`.
+
+```bash
+ln -s "$PWD/claude-acct" ~/.local/bin/claude-acct
+claude-acct save            # once per account: log in as it, then save
+claude-acct install-handler # builds ~/Applications/ClaudeAcct.app for claude-acct:// links
+claude-acct use INFO        # switch every session to INFO
+claude-acct list            # saved accounts and their last known usage
+claude-acct doctor          # checks the setup, never prints secrets
+```
+
+Once two or more accounts are saved, the status line shows the other ones after
+the account tag, colored by their last known 5h usage. Cmd+click one to switch.
+For the links to be clickable:
+
+- the terminal must support OSC 8 links (Ghostty, iTerm2, Kitty, WezTerm),
+- inside tmux: `set -as terminal-features ',xterm-ghostty:hyperlinks'`,
+- Claude Code only detects link support in a few terminals, so export
+  `FORCE_HYPERLINK=1` before starting it (needed inside tmux).
+
+How a switch works:
+
+1. The live credential of the account you leave goes back into its own keychain
+   item (`claude-statusline-account`, one per label). Sessions rotate the
+   refresh token while they run, so the copy from `save` goes stale. Always switch
+   with `claude-acct`; after a manual `/login`, run `claude-acct save` again.
+2. The target credential becomes the active `Claude Code-credentials` item, and
+   `.oauthAccount` in `~/.claude.json` is replaced (all other keys are kept).
+3. After a few seconds, tmux panes that stopped on a limit or login error get
+   `continue`. A pane only counts when one of Claude Code's own errors is in its
+   last lines, its prompt is empty, and it is not already waiting to continue
+   automatically. `claude-acct nudge --dry-run` shows which panes would get it.
+
+Credentials up to 2000 characters are written through `security -i` on stdin,
+so they never show up in the process list. Profiles in
+`~/.config/claude-statusline/profiles/` hold only the non-secret account details
+(mode 600). Any page can open a `claude-acct://` link; the worst it can do is
+switch between your saved accounts. Labels are restricted to letters, digits,
+`-` and `_`.
+
 ## Development
 
 ```bash
-./test/run.sh                                                   # tests
-shellcheck --shell=bash claude-statusline.sh install.sh test/run.sh   # lint
+./test/run.sh && ./test/acct.sh                                  # tests
+shellcheck --shell=bash claude-statusline.sh claude-acct install.sh test/*.sh   # lint
 ```
 
 Fixture-driven assertions covering the full payload, missing `rate_limits`, null
 context, a non-git cwd, an already-elapsed reset, color thresholds, malformed
 JSON, and an empty object -- plus colors, exit codes, stderr cleanliness,
 detached `HEAD`, and account-label mapping. Exits 0 on green.
+
+`test/acct.sh` covers `claude-acct` against file-backed stubs of `security`
+and `tmux`, so it never touches the real keychain or real sessions and runs on
+Linux CI too.
 
 Fixtures may contain `__RESET_FUTURE__`, `__RESET_FUTURE_7D__`, and `__CWD__`
 placeholders, substituted at run time. Reset timestamps must stay computed rather

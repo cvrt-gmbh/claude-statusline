@@ -228,6 +228,42 @@ usage_sync() {
   printf '%s' "$five|$five_reset|$seven|$seven_reset"
 }
 
+# switch_links CURRENT_LABEL -> "⇄ INFO 98% DEV 3%", one clickable OSC 8 link
+# per account saved with claude-acct other than the active one, colored by that
+# account's last known 5h usage. Cmd+click opens claude-acct://use/LABEL, which
+# the ClaudeAcct handler app turns into `claude-acct use LABEL`.
+switch_links() {
+  local cur=$1
+  local config="${XDG_CONFIG_HOME:-$HOME/.config}/claude-statusline"
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
+  [[ -d "$config/profiles" ]] || return 0
+  local now f l email text color pct p_five p_reset out=""
+  now=$(date +%s)
+  for f in "$config/profiles"/*.json; do
+    [[ -f "$f" ]] || continue
+    l=$(basename "$f" .json)
+    [[ "$l" == "$cur" ]] && continue
+    [[ $l =~ ^[A-Za-z0-9_-]{1,32}$ ]] || continue
+    text=$l color=$C_DIM
+    email=$(jq -r '.emailAddress // empty' "$f" 2>/dev/null) || email=""
+    if [[ -n "$email" && -f "$cache/usage-$email" ]]; then
+      IFS='|' read -r p_five p_reset _ <"$cache/usage-$email" || true
+      if is_uint "$p_reset" && is_uint "$now" && (( p_reset <= now )); then
+        pct=0
+      else
+        pct=$(round_pct "$p_five") || pct=""
+      fi
+      if [[ -n "$pct" ]]; then
+        text="$l ${pct}%"
+        color=$(color_for_pct "$pct" 50 90)
+      fi
+    fi
+    out+="${color}"$'\033]8;;'"claude-acct://use/${l}"$'\a'"${text}"$'\033]8;;\a'"${C_RESET} "
+  done
+  [[ -n "$out" ]] && printf '%s' "${C_DIM}⇄${C_RESET} ${out% }"
+  return 0
+}
+
 render() {
   local input=$1
   local segments=()
@@ -303,6 +339,11 @@ render() {
   else
     segments+=("${tag_color}[${label}]${C_RESET}")
   fi
+
+  # Widget 1b: links to switch to the other saved accounts.
+  local switch
+  switch=$(switch_links "$label") || switch=""
+  [[ -n "$switch" ]] && segments+=("$switch")
 
   # Widget 2: model (dim).
   segments+=("${C_DIM}${model:-Claude}${C_RESET}")
