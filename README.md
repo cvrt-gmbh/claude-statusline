@@ -126,15 +126,16 @@ claude-acct save            # save the account that is logged in now
 claude-acct login           # log in to another account and save it; open sessions stay put
 claude-acct install-handler # builds ~/Applications/ClaudeAcct.app for claude-acct:// links
 claude-acct use INFO        # switch every session to INFO
-claude-acct list
-claude-acct refresh   # reload every account's usage from the API            # saved accounts and their last known usage
+claude-acct list            # saved accounts and their last known usage
+claude-acct refresh         # reload every account's usage from the API (runs after each use)
 claude-acct doctor          # checks the setup, never prints secrets
 ```
 
-Once two or more accounts are saved, the status line shows the other ones after
-the account tag, colored by their last known 5h usage. Cmd+click one to switch.
-A `+ login` link at the end of the line opens `claude-acct login` in a new tmux
-window (or a new Ghostty window without tmux).
+Once accounts are saved, the status line lists each one on its own line (see
+the table above). Cmd+click a name to switch. A `+ login` link at the end of the
+first line opens `claude-acct login` in a new tmux window (or a new Ghostty
+window without tmux). Other accounts' numbers come from the cache that sessions
+of that account publish, and from `claude-acct refresh`.
 
 `claude-acct login` runs `claude auth login` with a temporary
 `CLAUDE_CONFIG_DIR`, which gets its own credential store, so the open sessions
