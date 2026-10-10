@@ -79,6 +79,7 @@ case "$1" in
   list-sessions) echo "main: 1 windows" ;;
   new-window) shift; printf '%s\n' "$*" >>"$STUB_TMUX/windows" ;;
   show) echo "" ;;
+  list-clients) cat "$STUB_TMUX/clients" 2>/dev/null ;;
 esac
 STUB
 cat >"$work/bin/claude" <<'STUB'
@@ -274,6 +275,11 @@ if [[ "$raw" != *"bad;rm"* ]]; then ok "skips profile files with unsafe labels";
 
 loginlink=$'\033]8;;claude-acct://login\a+ login\033]8;;\a'
 if [[ "$raw" == *"$loginlink" || "$raw" == *"$loginlink"$'\033[0m' ]]; then ok "renders a + login link at the end of the line"; else bad "+ login link" "$(printf '%s' "$raw" | cat -v)"; fi
+
+printf '/dev/ttys000 clipboard,focus,title\n/dev/ttys001 clipboard,hyperlinks,title\n' >"$STUB_TMUX/clients"
+doc=$(TMUX=/tmp/stub,1,0 "$acct" doctor 2>&1)
+if [[ "$doc" == *"client /dev/ttys000: hyperlinks OFF"* ]]; then ok "doctor flags a tmux client attached without hyperlinks"; else bad "doctor flags a tmux client attached without hyperlinks" "$doc"; fi
+if [[ "$doc" == *"client /dev/ttys001: hyperlinks on"* ]]; then ok "doctor reports a tmux client with hyperlinks as on"; else bad "doctor reports a tmux client with hyperlinks as on" "$doc"; fi
 
 echo
 echo "Passed: $pass  Failed: $fail"

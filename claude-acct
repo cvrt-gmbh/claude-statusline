@@ -421,7 +421,15 @@ cmd_doctor() {
   [[ -d "$APP_DIR" ]] && echo "URL handler: $APP_DIR" || echo "URL handler: not installed (claude-acct install-handler)"
   if command -v tmux >/dev/null 2>&1 && [[ -n "${TMUX:-}" ]]; then
     tmux show -sv terminal-features 2>/dev/null | grep -q hyperlinks \
-      && echo "tmux: hyperlinks enabled" || echo "tmux: hyperlinks NOT enabled (links in the status bar will not be clickable)"
+      && echo "tmux config: hyperlinks enabled" || echo "tmux config: hyperlinks NOT enabled (add terminal-features ...:hyperlinks to tmux.conf)"
+    # A client keeps the features it had when it attached, so a config change
+    # only reaches it after a detach and re-attach.
+    local tty feats
+    while read -r tty feats; do
+      [[ ",$feats," == *,hyperlinks,* ]] \
+        && echo "tmux client $tty: hyperlinks on" \
+        || echo "tmux client $tty: hyperlinks OFF, links are not clickable here (detach and run tmux attach)"
+    done < <(tmux list-clients -F '#{client_tty} #{client_termfeatures}' 2>/dev/null)
   fi
   [[ "${FORCE_HYPERLINK:-}" == 1 ]] && echo "FORCE_HYPERLINK=1" || echo "FORCE_HYPERLINK not set (Claude Code inside tmux strips links without it)"
 }
