@@ -14,6 +14,7 @@ Built for Claude Max / Team Max plans where dollar amounts and burn-rate are mea
 - Context-window usage with color thresholds
 - 5-hour rate-limit usage + countdown to reset
 - 7-day rate-limit usage
+- Usage shared across all open sessions of the same account, so idle tabs never show stale 5h/7d numbers
 - Git branch for orientation
 - Graceful degradation when fields are missing (never blanks the bar)
 
@@ -71,6 +72,23 @@ sitting on a threshold escalates rather than under-reporting: `89.7` renders as
 The 5h countdown is omitted when the reset time has already passed, rather than
 showing `(0m)`.
 
+### Shared usage across sessions
+
+Claude Code sends each session's `rate_limits` as of that session's last API
+response, so an idle tab keeps showing old numbers, and after an account switch
+it shows the previous account's numbers until it makes a request. To fix this,
+every session publishes new readings to a per-account cache
+(`~/.cache/claude-statusline/usage-<email>`), and every tab renders the newest
+reading for the account that is currently logged in.
+
+- A reading is newer if its window resets later, or, within the same window, if
+  its percentage is higher.
+- A session publishes only numbers that changed after it was first seen. A tab
+  that was already open across an account switch still carries the old
+  account's numbers unchanged, so they never leak into the new account's cache.
+- Once a cached window's reset time has passed, it renders as 0% with no
+  countdown, never as a tab's own stale snapshot.
+
 ## Configuration
 
 Edit `~/.config/claude-statusline/accounts.toml` to map your Claude account emails to labels:
@@ -121,6 +139,7 @@ The script never blanks the status bar. When data is missing:
 - 5h reset already elapsed, or a non-numeric `resets_at`: countdown omitted, percentage still shown.
 - Detached `HEAD`: branch segment shows the short SHA (`@abc1234`).
 - `git` not installed: branch segment omitted.
+- Cache directory not writable: each tab shows its own payload, as before.
 
 ## License
 

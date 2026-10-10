@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 5h and 7d usage are shared across all open sessions of the same account via
+  `~/.cache/claude-statusline/usage-<email>`. Previously each tab showed the
+  snapshot from its own last API response, so idle tabs showed stale usage and,
+  after an account switch, the previous account's usage. Only numbers that
+  changed after a session was first seen are published, so the old account's
+  snapshot never leaks into the new account's cache. A cached window whose
+  reset has passed renders as 0%.
+
 ### Fixed
 
 - Countdown rendered absurd durations such as `5h 67% (615298h 15m)`. Test
