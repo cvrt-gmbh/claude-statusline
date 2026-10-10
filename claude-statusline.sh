@@ -127,6 +127,107 @@ current_email() {
   jq -r '.oauthAccount.emailAddress // empty' "$state" 2>/dev/null || true
 }
 
+# write_atomic FILE CONTENT -> replace FILE via rename so concurrent readers
+# (one status line per open session) never see a half-written file.
+write_atomic() {
+  local tmp
+  tmp=$(mktemp "$(dirname "$1")/.tmp.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s\n' "$2" >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$1" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# is_newer RESET_A PCT_A RESET_B PCT_B -> 0 when window reading A is newer than B
+# A later reset means a later window; within one window usage only grows, so a
+# higher percentage is the more recent reading. A missing B always loses.
+is_newer() {
+  awk -v ra="$1" -v pa="$2" -v rb="$3" -v pb="$4" 'BEGIN {
+    num = "^[0-9]+([.][0-9]+)?$"
+    if (ra !~ num || pa !~ num) exit 1
+    if (rb !~ num || pb !~ num) exit 0
+    if (ra + 0 > rb + 0) exit 0
+    if (ra + 0 == rb + 0 && pa + 0 > pb + 0) exit 0
+    exit 1
+  }' 2>/dev/null
+}
+
+# usage_sync EMAIL SESSION FIVE FIVE_RESET SEVEN SEVEN_RESET
+#   -> "five|five_reset|seven|seven_reset" to display
+#
+# rate_limits in the payload is a snapshot from THIS session's last API
+# response, so an idle session shows stale usage forever. All sessions of one
+# account share a per-account cache instead: whoever saw the newest numbers
+# publishes them, and everyone renders the newest.
+#
+# A session only publishes when its numbers changed since its previous tick.
+# After an account switch, an idle session still carries the OLD account's
+# numbers; they are unchanged, so they never leak into the new account's cache.
+usage_sync() {
+  local email=$1 session=$2 five=$3 five_reset=$4 seven=$5 seven_reset=$6
+  local payload="$five|$five_reset|$seven|$seven_reset"
+  [[ -n "$email" ]] || { printf '%s' "$payload"; return 0; }
+
+  local dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
+  mkdir -p "$dir" 2>/dev/null || { printf '%s' "$payload"; return 0; }
+  local shared
+  shared="$dir/usage-$(printf '%s' "$email" | tr -c 'A-Za-z0-9._@-' '_')"
+
+  local s_five="" s_five_reset="" s_seven="" s_seven_reset=""
+  if [[ -f "$shared" ]]; then
+    IFS='|' read -r s_five s_five_reset s_seven s_seven_reset <"$shared" || true
+  fi
+
+  # A session first seen WITH numbers cannot prove which account they belong
+  # to (it may predate a switch, or this script), so that first reading is only
+  # recorded. New sessions start without rate_limits (they arrive with the first
+  # API response), so their first real reading is a change and gets published.
+  if [[ -n "$session" ]]; then
+    local seen_file last="" known=0
+    seen_file="$dir/seen-$(printf '%s' "$session" | tr -c 'A-Za-z0-9._-' '_')"
+    if [[ -f "$seen_file" ]]; then
+      last=$(cat "$seen_file" 2>/dev/null) || last=""
+      known=1
+    else
+      # New session: prune markers of sessions gone for a week.
+      find "$dir" -name 'seen-*' -mtime +7 -delete 2>/dev/null || true
+    fi
+    if (( ! known )) || [[ "$last" != "$payload" ]]; then
+      write_atomic "$seen_file" "$payload"
+    fi
+    if (( known )) && [[ "$last" != "$payload" && -n "$five$seven" ]]; then
+      local changed=0
+      if is_newer "$five_reset" "$five" "$s_five_reset" "$s_five"; then
+        s_five=$five; s_five_reset=$five_reset; changed=1
+      fi
+      if is_newer "$seven_reset" "$seven" "$s_seven_reset" "$s_seven"; then
+        s_seven=$seven; s_seven_reset=$seven_reset; changed=1
+      fi
+      (( changed )) && write_atomic "$shared" "$s_five|$s_five_reset|$s_seven|$s_seven_reset"
+    fi
+  fi
+
+  # The shared reading is never older than this session's payload, so always
+  # prefer it. Once its window has reset, the account has used 0% of the new
+  # window. Falling back to the payload there would resurrect a stale snapshot,
+  # possibly of the account that was active before a switch.
+  local now
+  now=$(date +%s)
+  is_uint "$now" || now=0
+  if is_uint "$s_five_reset"; then
+    if (( s_five_reset > now )); then five=$s_five; five_reset=$s_five_reset
+    else five=0; five_reset=""
+    fi
+  fi
+  if is_uint "$s_seven_reset"; then
+    if (( s_seven_reset > now )); then seven=$s_seven; seven_reset=$s_seven_reset
+    else seven=0; seven_reset=""
+    fi
+  fi
+  printf '%s' "$five|$five_reset|$seven|$seven_reset"
+}
+
 render() {
   local input=$1
   local segments=()
@@ -146,6 +247,8 @@ render() {
     , (.rate_limits.five_hour.resets_at // "")
     , (.rate_limits.seven_day.used_percentage // "")
     , (.cwd // "")
+    , (.session_id // "")
+    , (.rate_limits.seven_day.resets_at // "")
     ] | map(tostring) | .[]' 2>/dev/null) || parsed=""
 
   if [[ -z "$parsed" ]]; then
@@ -168,6 +271,18 @@ render() {
   local five_reset=${fields[3]:-}
   local seven_raw=${fields[4]:-}
   local cwd=${fields[5]:-}
+  local session=${fields[6]:-}
+  local seven_reset=${fields[7]:-}
+
+  local email
+  email=$(current_email)
+
+  # Replace this session's possibly stale snapshot with the newest reading any
+  # session of the same account has seen.
+  local synced
+  synced=$(usage_sync "$email" "$session" "$five_raw" "$five_reset" "$seven_raw" "$seven_reset") \
+    || synced="$five_raw|$five_reset|$seven_raw|$seven_reset"
+  IFS='|' read -r five_raw five_reset seven_raw seven_reset <<<"$synced" || true
 
   # 5h usage drives both its own segment and the account tag color, so round once.
   local five_pct=""
@@ -175,8 +290,7 @@ render() {
 
   # Widget 1: account tag. Colored by 5h usage when known, so the tag itself
   # carries the usage signal even before you read the numbers.
-  local email label tag_color="$C_DIM"
-  email=$(current_email)
+  local label tag_color="$C_DIM"
   label=$(account_label "$email")
   if [[ -n "$five_pct" ]]; then
     tag_color=$(color_for_pct "$five_pct" 50 90)

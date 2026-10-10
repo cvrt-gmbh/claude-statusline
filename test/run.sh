@@ -32,9 +32,13 @@ now=$(date +%s)
 reset_future=$(( now + 7920 ))    # 2h 12m
 reset_future_7d=$(( now + 259200 ))  # 3d
 
-# Isolate from the developer's real account map so results are reproducible.
+# Isolate from the developer's real account map, logged-in account and usage
+# cache so results are reproducible. With the real ~/.claude.json, fixtures
+# would publish into and read from the developer's live shared usage cache.
 export XDG_CONFIG_HOME="$work_dir/config"
-mkdir -p "$XDG_CONFIG_HOME/claude-statusline"
+export XDG_CACHE_HOME="$work_dir/cache"
+mkdir -p "$XDG_CONFIG_HOME/claude-statusline" "$work_dir/nohome"
+export HOME="$work_dir/nohome"
 
 fail=0
 pass=0
@@ -245,6 +249,90 @@ if [[ "$out" == "[?]"* ]]; then
 else
   bad "literal '?' label should render [?]" "$out"
 fi
+
+echo "shared usage across sessions ..."
+rm -f "$XDG_CONFIG_HOME/claude-statusline/accounts.toml"
+r5=$(( now + 3600 )); r5_late=$(( now + 7200 )); r7=$(( now + 259200 ))
+
+# home_for EMAIL -> a fake HOME whose ~/.claude.json is logged in as EMAIL
+home_for() {
+  local h="$work_dir/home-$1"
+  mkdir -p "$h"
+  printf '{"oauthAccount":{"emailAddress":"%s"}}' "$1" >"$h/.claude.json"
+  printf '%s' "$h"
+}
+
+# tick EMAIL SESSION FIVE FIVE_RESET SEVEN SEVEN_RESET -> stripped status line
+# Pass FIVE="-" for a payload without rate_limits (session before its first response).
+tick() {
+  local payload
+  if [[ "$3" == "-" ]]; then
+    payload=$(printf '{"session_id":"%s","model":{"display_name":"Opus"}}' "$2")
+  else
+    payload=$(printf '{"session_id":"%s","model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":%s,"resets_at":%s}}}' \
+      "$2" "$3" "$4" "$5" "$6")
+  fi
+  printf '%s' "$payload" | HOME="$(home_for "$1")" "$target" 2>/dev/null | strip_ansi
+}
+
+# expect LABEL OUTPUT NEEDLE
+expect() {
+  if [[ "$2" == *"$3"* ]]; then ok "$1"; else bad "$1 (want '$3')" "$2"; fi
+}
+
+# A session already open when this feature (or an account switch) arrived is
+# first seen WITH numbers of unknown account; it must not publish them.
+tick a@example.com s0 99 "$r5_late" 99 "$r7" >/dev/null
+out=$(tick a@example.com s3 - - - -)
+if [[ "$out" != *"5h"* && "$out" != *"7d"* ]]; then
+  ok "a session first seen with numbers does not publish them"
+else
+  bad "first-seen numbers leaked into the shared cache" "$out"
+fi
+
+# New sessions start without rate_limits; their first real reading publishes.
+for s in s1 s2 s9; do tick a@example.com "$s" - - - - >/dev/null; done
+tick a@example.com s1 80 "$r5" 30 "$r7" >/dev/null
+expect "idle session renders the newer 5h reading of its account" \
+  "$(tick a@example.com s2 20 "$r5" 10 "$r7")" "5h 80%"
+expect "idle session renders the newer 7d reading of its account" \
+  "$(tick a@example.com s2 20 "$r5" 10 "$r7")" "7d 30%"
+expect "session without rate_limits renders the shared reading" \
+  "$(tick a@example.com s3 - - - -)" "5h 80% (59m)"
+expect "fresh higher reading from another session wins" \
+  "$(tick a@example.com s2 85 "$r5" 31 "$r7")" "5h 85%"
+expect "first session follows the newer reading on its next tick" \
+  "$(tick a@example.com s1 80 "$r5" 30 "$r7")" "5h 85%"
+expect "a later window beats a higher percentage of an older window" \
+  "$(tick a@example.com s1 2 "$r5_late" 31 "$r7")" "5h 2%"
+
+# Account switch: s1 still carries account a's numbers (unchanged payload).
+# They must neither show nor leak into account b's cache.
+tick b@example.com s9 5 "$r5" 1 "$r7" >/dev/null
+out=$(tick b@example.com s1 2 "$r5_late" 31 "$r7")
+expect "after a switch, a stale session shows the new account's 5h" "$out" "5h 5%"
+expect "after a switch, a stale session shows the new account's 7d" "$out" "7d 1%"
+expect "the stale numbers did not leak into the new account's cache" \
+  "$(tick b@example.com s3 - - - -)" "5h 5%"
+
+# An elapsed shared window means the account starts the new window at 0%. It
+# must not fall back to a session's stale snapshot (here s0's 99%, which could
+# be the previous account's numbers).
+past=$(( now - 60 ))
+tick c@example.com s1 90 "$past" 40 "$r7" >/dev/null
+out=$(tick c@example.com s0 99 "$r5_late" 99 "$r7")
+if [[ "$out" == *"5h 0% "* && "$out" != *"5h 0% ("* && "$out" == *"7d 40%"* ]]; then
+  ok "an elapsed shared 5h window renders 0% without countdown, not a stale snapshot"
+else
+  bad "elapsed shared 5h window should render 0%" "$out"
+fi
+
+# Without a logged-in account there is no key, so nothing is cached.
+before=$(find "$XDG_CACHE_HOME" -name 'usage-*' | wc -l | tr -d ' ')
+printf '{"session_id":"x","rate_limits":{"five_hour":{"used_percentage":50,"resets_at":%s}}}' "$r5" \
+  | HOME="$work_dir/nohome" "$target" >/dev/null 2>&1
+after=$(find "$XDG_CACHE_HOME" -name 'usage-*' | wc -l | tr -d ' ')
+if [[ "$before" == "$after" ]]; then ok "no account means no shared cache file"; else bad "no account wrote a cache file" "$before -> $after"; fi
 
 echo
 echo "Passed: $pass  Failed: $fail"
