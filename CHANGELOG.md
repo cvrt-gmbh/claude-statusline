@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `claude-acct`: switch the Claude Code login of every open session at once
+  (`save`, `use`, `list`, `nudge`, `doctor`), without the logout gap that kills
+  in-flight requests. Banks the rotated credential of the account it leaves,
+  then sends `continue` to tmux panes that stopped on a limit or login error.
+- Clickable account switch in the status line: the other saved accounts render
+  as OSC 8 `claude-acct://use/LABEL` links with their last known 5h usage,
+  handled by `~/Applications/ClaudeAcct.app` (`claude-acct install-handler`).
+
 - 5h and 7d usage are shared across all open sessions of the same account via
   `~/.cache/claude-statusline/usage-<email>`. Previously each tab showed the
   snapshot from its own last API response, so idle tabs showed stale usage and,

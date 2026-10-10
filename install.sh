@@ -26,7 +26,7 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 chmod +x "$script_dir/claude-statusline.sh"
-chmod +x "$script_dir/test/run.sh"
+chmod +x "$script_dir/test/run.sh" "$script_dir/test/acct.sh" "$script_dir/claude-acct"
 
 cat <<EOF
 
@@ -47,9 +47,13 @@ Test the script directly:
 
 Run the tests:
 
-  cd $script_dir && ./test/run.sh
+  cd $script_dir && ./test/run.sh && ./test/acct.sh
+
+Account switching (macOS, optional): see "Account switching" in README.md.
+
+  ln -s $script_dir/claude-acct ~/.local/bin/claude-acct && claude-acct install-handler
 
 Lint (optional, requires shellcheck):
 
-  cd $script_dir && shellcheck --shell=bash claude-statusline.sh install.sh test/run.sh
+  cd $script_dir && shellcheck --shell=bash claude-statusline.sh claude-acct install.sh test/*.sh
 EOF

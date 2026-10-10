@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# claude-acct: switch the Claude Code login for ALL open sessions at once.
+#
+# Running sessions re-read the login from the macOS Keychain, so replacing the
+# active credential flips every tab within seconds. Unlike logout + login there
+# is no window without a login, which is what killed in-flight requests and
+# subagents ("Not logged in · Please run /login").
+#
+#   claude-acct save [LABEL]     remember the account that is logged in now
+#   claude-acct use LABEL        switch every session to LABEL, then nudge
+#   claude-acct list             saved accounts, active one, cached usage
+#   claude-acct nudge [--dry-run] send "continue" to sessions stopped by a limit
+#   claude-acct handle-url URL   entry point for claude-acct://use/LABEL links
+#   claude-acct install-handler  build the URL handler app (macOS)
+#   claude-acct doctor           check the pieces, never prints secrets
+#
+# Labels come from ~/.config/claude-statusline/accounts.toml (email -> label).
+
+set -uo pipefail
+
+# The URL handler runs us with launchd's minimal PATH. Appended, not prepended,
+# so tests can shadow `security` and `tmux` with stubs.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+ACTIVE_SVC=${CLAUDE_ACCT_ACTIVE_SVC:-"Claude Code-credentials"}
+SLOT_SVC=${CLAUDE_ACCT_SLOT_SVC:-"claude-statusline-account"}
+CLAUDE_JSON=${CLAUDE_ACCT_CLAUDE_JSON:-"$HOME/.claude.json"}
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-statusline"
+PROFILES_DIR="$CONFIG_DIR/profiles"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
+LOG_FILE="$CACHE_DIR/claude-acct.log"
+APP_DIR=${CLAUDE_ACCT_APP_DIR:-"$HOME/Applications/ClaudeAcct.app"}
+URL_SCHEME="claude-acct"
+
+# `security -i` reads one command per line from stdin and rejects lines over
+# ~4 KiB. Hex doubles the size, so values up to 2000 chars go that way and
+# never appear in the process list; longer ones fall back to argv.
+STDIN_MAX=2000
+
+log() {
+  mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+notify() {
+  [[ "${CLAUDE_ACCT_NOTIFY:-1}" == 1 ]] || return 0
+  command -v osascript >/dev/null 2>&1 || return 0
+  osascript -e "display notification \"${2//\"/}\" with title \"${1//\"/}\"" >/dev/null 2>&1 || true
+}
+
+die() {
+  printf 'claude-acct: %s\n' "$1" >&2
+  log "ERROR $1"
+  notify "claude-acct" "$1"
+  exit 1
+}
+
+# file_mode FILE -> octal permission bits. `stat -f` means "file system" on GNU,
+# so the flavor is picked by OS rather than by trial.
+file_mode() {
+  if [[ "$(uname)" == Darwin ]]; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
+}
+
+valid_label() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+
+# ============ accounts.toml ============
+
+# label_for_email EMAIL -> label, or empty. Same parser as claude-statusline.sh.
+label_for_email() {
+  local config="$CONFIG_DIR/accounts.toml"
+  [[ -f "$config" && -n "$1" ]] || return 0
+  awk -v target="$1" '
+    /^[[:space:]]*\[\[account\]\]/ { email_val=""; label_val=""; next }
+    /^[[:space:]]*email[[:space:]]*=/ {
+      if (match($0, /"[^"]*"/)) email_val = substr($0, RSTART + 1, RLENGTH - 2)
+    }
+    /^[[:space:]]*label[[:space:]]*=/ {
+      if (match($0, /"[^"]*"/)) label_val = substr($0, RSTART + 1, RLENGTH - 2)
+    }
+    email_val != "" && label_val != "" && email_val == target { print label_val; exit }
+  ' "$config" 2>/dev/null
+}
+
+current_email() {
+  jq -r '.oauthAccount.emailAddress // empty' "$CLAUDE_JSON" 2>/dev/null || true
+}
+
+# ============ keychain ============
+
+# kc_account SVC -> the "acct" attribute of the first item of SVC
+kc_account() {
+  security find-generic-password -s "$1" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"acct"<blob>="\(.*\)"$/\1/p' | head -1
+}
+
+kc_read() {
+  security find-generic-password -a "$2" -s "$1" -w 2>/dev/null
+}
+
+# kc_write SVC ACCT VALUE -> 0 when the value reads back identically
+kc_write() {
+  local svc=$1 acct=$2 value=$3
+  if (( ${#value} <= STDIN_MAX )); then
+    local hex
+    hex=$(printf '%s' "$value" | od -An -v -tx1 | tr -d ' \n')
+    # Quoted: the active service name contains a space.
+    printf 'add-generic-password -U -a "%s" -s "%s" -X %s\n' "$acct" "$svc" "$hex" \
+      | security -i >/dev/null 2>&1
+  else
+    security add-generic-password -U -a "$acct" -s "$svc" -w "$value" >/dev/null 2>&1
+  fi
+  [[ "$(kc_read "$svc" "$acct")" == "$value" ]]
+}
+
+# ============ commands ============
+
+cmd_save() {
+  local email label blob acct
+  email=$(current_email)
+  [[ -n "$email" ]] || die "not logged in (no oauthAccount in $CLAUDE_JSON)"
+  label=${1:-$(label_for_email "$email")}
+  [[ -n "$label" ]] || die "no label for $email: add it to $CONFIG_DIR/accounts.toml or pass one"
+  valid_label "$label" || die "invalid label '$label' (letters, digits, - and _ only)"
+
+  acct=$(kc_account "$ACTIVE_SVC")
+  [[ -n "$acct" ]] || die "no '$ACTIVE_SVC' keychain item: log in to Claude Code first"
+  blob=$(kc_read "$ACTIVE_SVC" "$acct")
+  jq -e '.claudeAiOauth.refreshToken | length > 0' >/dev/null 2>&1 <<<"$blob" \
+    || die "the active credential has no refresh token; log in again"
+
+  kc_write "$SLOT_SVC" "$label" "$blob" || die "could not store $label in the keychain"
+  mkdir -p "$PROFILES_DIR" && chmod 700 "$PROFILES_DIR"
+  (umask 077 && jq '.oauthAccount' "$CLAUDE_JSON" >"$PROFILES_DIR/$label.json") \
+    || die "could not write profile for $label"
+  log "save $label ($email)"
+  printf 'saved %s (%s)\n' "$label" "$email"
+}
+
+# set_oauth_account PROFILE -> replace .oauthAccount in ~/.claude.json atomically,
+# keeping every other key and the file mode.
+set_oauth_account() {
+  local tmp
+  tmp=$(mktemp "$CLAUDE_JSON.claude-acct.XXXXXX") || return 1
+  if jq --slurpfile p "$1" '.oauthAccount = $p[0]' "$CLAUDE_JSON" >"$tmp" 2>/dev/null \
+    && [[ -s "$tmp" ]]; then
+    chmod "$(file_mode "$CLAUDE_JSON")" "$tmp" 2>/dev/null
+    mv -f "$tmp" "$CLAUDE_JSON"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+cmd_use() {
+  local label=${1:-} nudge=1
+  [[ "${2:-}" == "--no-nudge" ]] && nudge=0
+  valid_label "$label" || die "usage: claude-acct use LABEL"
+  local profile="$PROFILES_DIR/$label.json"
+  [[ -f "$profile" ]] || die "$label is not saved: log in as it, then run 'claude-acct save'"
+  local target
+  target=$(kc_read "$SLOT_SVC" "$label")
+  [[ -n "$target" ]] || die "$label has no stored credential: log in as it, then run 'claude-acct save'"
+
+  mkdir -p "$CACHE_DIR"
+  # Global, not local: the EXIT trap runs after this function's locals are gone.
+  LOCK_DIR="$CACHE_DIR/claude-acct.lock"
+  mkdir "$LOCK_DIR" 2>/dev/null || die "another switch is running (remove $LOCK_DIR if stale)"
+  trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+  local email cur_label acct active
+  email=$(current_email)
+  cur_label=$(label_for_email "$email")
+  if [[ "$cur_label" == "$label" ]]; then
+    printf 'already on %s\n' "$label"
+    (( nudge )) && cmd_nudge
+    return 0
+  fi
+
+  acct=$(kc_account "$ACTIVE_SVC")
+  acct=${acct:-${USER:-$(id -un)}}
+  active=$(kc_read "$ACTIVE_SVC" "$acct")
+
+  # Bank the live credential of the account being left. Sessions rotate the
+  # refresh token while they run, so the copy from `save` goes stale; without
+  # this, switching back later would need a fresh login.
+  if [[ -n "$cur_label" && -f "$PROFILES_DIR/$cur_label.json" && -n "$active" ]]; then
+    kc_write "$SLOT_SVC" "$cur_label" "$active" || die "could not bank $cur_label's credential, nothing changed"
+  fi
+
+  kc_write "$ACTIVE_SVC" "$acct" "$target" || die "could not write the active credential"
+  set_oauth_account "$profile" || die "credential switched but $CLAUDE_JSON was not updated; run again"
+
+  local new_email
+  new_email=$(jq -r '.emailAddress // "?"' "$profile" 2>/dev/null)
+  log "use $label ($new_email), was ${cur_label:-?} (${email:-?})"
+  printf 'switched to %s (%s)\n' "$label" "$new_email"
+
+  local resumed=""
+  if (( nudge )); then
+    # Give running sessions a moment to pick up the new credential first.
+    sleep "${CLAUDE_ACCT_NUDGE_DELAY:-4}"
+    resumed=$(cmd_nudge | grep -c '^continued ' || true)
+    [[ "$resumed" == 0 ]] && resumed=""
+  fi
+  notify "Claude: $label" "Switched to $new_email${resumed:+ · resumed $resumed session(s)}"
+}
+
+# stopped_by_limit SCREEN -> 0 when the session's last output is a limit/auth
+# error and it is idle with an empty prompt.
+#
+# Deliberately strict: a false positive types "continue" into a session that
+# was waiting for an answer. Only errors Claude Code itself prints count (the
+# "⎿" result marker or "API error" agent failures), only near the bottom, and
+# never while it waits to continue on its own.
+stopped_by_limit() {
+  awk '
+    { line[NR] = $0 }
+    END {
+      # Prompt box: last line starting with the prompt glyph.
+      for (i = NR; i > 0; i--) if (line[i] ~ /^❯/) { p = i; break }
+      if (!p) exit 1
+      text = line[p]; sub(/^❯[[:space:]]*/, "", text); gsub(/[[:space:]]+$/, "", text)
+      if (text != "") exit 1
+      # The separator above the prompt, then the last 4 non-empty lines above it.
+      for (i = p - 1; i > 0; i--) if (line[i] ~ /^─+/) { s = i; break }
+      if (!s) exit 1
+      n = 0; tail = ""
+      for (i = s - 1; i > 0 && n < 4; i--) {
+        if (line[i] ~ /^[[:space:]]*$/) continue
+        tail = line[i] "\n" tail; n++
+      }
+      if (tail ~ /continuing automatically|esc to (interrupt|cancel)/) exit 1
+      if (tail ~ /(^|\n)[[:space:]]*⎿[[:space:]]+(Not logged in|You.ve hit your|API Error)/) exit 0
+      if (tail ~ /Agent terminated early due to an API error/) exit 0
+      exit 1
+    }'
+}
+
+cmd_nudge() {
+  local dry=0
+  [[ "${1:-}" == "--dry-run" ]] && dry=1
+  command -v tmux >/dev/null 2>&1 || return 0
+  local id cmd screen
+  while read -r id cmd; do
+    [[ "$cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$cmd" == claude ]] || continue
+    screen=$(tmux capture-pane -p -J -t "$id" 2>/dev/null) || continue
+    if stopped_by_limit <<<"$screen"; then
+      if (( dry )); then printf 'would continue %s\n' "$id"; continue; fi
+      # Target by pane id: window numbers shift when a window closes.
+      tmux send-keys -t "$id" -l continue && tmux send-keys -t "$id" Enter
+      log "nudge $id"
+      printf 'continued %s\n' "$id"
+    fi
+  done < <(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null)
+}
+
+cmd_list() {
+  local email cur f label pemail usage
+  email=$(current_email)
+  cur=$(label_for_email "$email")
+  [[ -d "$PROFILES_DIR" ]] || { echo "no saved accounts (claude-acct save)"; return 0; }
+  for f in "$PROFILES_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    label=$(basename "$f" .json)
+    pemail=$(jq -r '.emailAddress // "?"' "$f" 2>/dev/null)
+    usage=""
+    if [[ -f "$CACHE_DIR/usage-$pemail" ]]; then
+      usage=$(awk -F'|' '{ printf "5h %s%% · 7d %s%%", int($1 + 0.5), int($3 + 0.5) }' "$CACHE_DIR/usage-$pemail")
+    fi
+    printf '%s %-6s %-28s %s\n' "$([[ "$label" == "$cur" ]] && echo '*' || echo ' ')" "$label" "$pemail" "$usage"
+  done
+}
+
+cmd_handle_url() {
+  local url=${1:-} label
+  case "$url" in
+    "$URL_SCHEME://use/"*) label=${url#"$URL_SCHEME://use/"}; label=${label%/} ;;
+    *) die "unsupported link: $url" ;;
+  esac
+  valid_label "$label" || die "invalid label in link: $label"
+  log "link $url"
+  cmd_use "$label"
+}
+
+cmd_install_handler() {
+  [[ "$(uname)" == Darwin ]] || die "the URL handler is macOS only"
+  local self plist
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  rm -rf "$APP_DIR"
+  mkdir -p "$(dirname "$APP_DIR")"
+  osacompile -o "$APP_DIR" \
+    -e 'on open location theURL' \
+    -e "do shell script quoted form of \"$self\" & \" handle-url \" & quoted form of theURL & \" >/dev/null 2>&1 &\"" \
+    -e 'end open location' || die "osacompile failed"
+  plist="$APP_DIR/Contents/Info.plist"
+  /usr/libexec/PlistBuddy \
+    -c "Add :CFBundleIdentifier string de.cavort.claude-acct" \
+    -c "Add :LSUIElement bool true" \
+    -c "Add :CFBundleURLTypes array" \
+    -c "Add :CFBundleURLTypes:0 dict" \
+    -c "Add :CFBundleURLTypes:0:CFBundleURLName string de.cavort.claude-acct" \
+    -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" \
+    -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string $URL_SCHEME" \
+    "$plist" || die "could not write $plist"
+  codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || die "codesign failed"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_DIR" \
+    || die "lsregister failed"
+  printf 'installed %s for %s:// links\n' "$APP_DIR" "$URL_SCHEME"
+}
+
+cmd_doctor() {
+  local acct blob email
+  acct=$(kc_account "$ACTIVE_SVC")
+  if [[ -n "$acct" ]]; then echo "active keychain item: account $acct"
+  else echo "active keychain item: MISSING"
+  fi
+  if [[ -n "$acct" ]]; then
+    blob=$(kc_read "$ACTIVE_SVC" "$acct")
+    echo "  length ${#blob} chars ($( (( ${#blob} <= STDIN_MAX )) && echo 'written via stdin' || echo 'written via argv'))"
+    jq -e '.claudeAiOauth.refreshToken | length > 0' >/dev/null 2>&1 <<<"$blob" \
+      && echo "  has refresh token" || echo "  NO refresh token"
+    unset blob
+  fi
+  email=$(current_email)
+  echo "logged in as: ${email:-?} -> label ${email:+$(label_for_email "$email")}"
+  echo "saved:"; cmd_list | sed 's/^/  /'
+  [[ -d "$APP_DIR" ]] && echo "URL handler: $APP_DIR" || echo "URL handler: not installed (claude-acct install-handler)"
+  if command -v tmux >/dev/null 2>&1 && [[ -n "${TMUX:-}" ]]; then
+    tmux show -sv terminal-features 2>/dev/null | grep -q hyperlinks \
+      && echo "tmux: hyperlinks enabled" || echo "tmux: hyperlinks NOT enabled (links in the status bar will not be clickable)"
+  fi
+  [[ "${FORCE_HYPERLINK:-}" == 1 ]] && echo "FORCE_HYPERLINK=1" || echo "FORCE_HYPERLINK not set (Claude Code inside tmux strips links without it)"
+}
+
+main() {
+  local cmd=${1:-}
+  shift || true
+  case "$cmd" in
+    save) cmd_save "$@" ;;
+    use) cmd_use "$@" ;;
+    list) cmd_list ;;
+    nudge) cmd_nudge "$@" ;;
+    handle-url) cmd_handle_url "$@" ;;
+    install-handler) cmd_install_handler ;;
+    doctor) cmd_doctor ;;
+    *) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 1 ;;
+  esac
+}
+
+main "$@"
