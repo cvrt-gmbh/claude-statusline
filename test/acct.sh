@@ -276,7 +276,8 @@ printf '4|%s|18|%s\n' "$in1h" "$in2d" >"$cachedir/usage-info@example.com"
 session() { printf '{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":%s},"seven_day":{"used_percentage":8,"resets_at":%s}}}' "$1" "$in1h" "$in2d" | "$statusline" 2>/dev/null; }
 row() { printf '%s\n' "$1" | grep -a -- "$2"; }
 raw=$(session 60); txt=$(printf '%s' "$raw" | plain)
-if (( $(printf '%s\n' "$raw" | wc -l) == $(ls "$XDG_CONFIG_HOME/claude-statusline/profiles"/*.json | wc -l) + 1 )); then ok "prints one line per saved account under the model line"; else bad "one line per account" "$txt"; fi
+profiles=("$XDG_CONFIG_HOME/claude-statusline/profiles"/*.json)
+if (( $(printf '%s\n' "$raw" | wc -l) == ${#profiles[@]} + 1 )); then ok "prints one line per saved account under the model line"; else bad "one line per account" "$txt"; fi
 if [[ "$raw" == *$'\033]8;;claude-acct://use/INFO\aINFO\033]8;;\a'* ]]; then ok "links each other account's name to claude-acct://use/LABEL"; else bad "links other accounts" "$(printf '%s' "$raw" | cat -v)"; fi
 if [[ "$raw" != *"claude-acct://use/JAY"* && "$(row "$txt" ' JAY ')" == $'\xe2\x86\x92 JAY'*"5h  60%"* ]]; then ok "marks the active account with an arrow, unlinked, with this session's 5h"; else bad "active row" "$txt"; fi
 if [[ "$txt" != *"["* ]]; then ok "no brackets around any account name"; else bad "brackets" "$txt"; fi
