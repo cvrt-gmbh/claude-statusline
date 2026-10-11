@@ -393,7 +393,9 @@ api_refresh_maybe() {
   local dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
   local stamp="$dir/api-refresh" now mtime
   now=$(date +%s)
-  mtime=$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)
+  # GNU form first: on Linux `stat -f` means file-system status and succeeds
+  # with garbage; BSD/macOS stat rejects -c, so the fallback is unambiguous.
+  mtime=$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp" 2>/dev/null || echo 0)
   is_uint "$now" && is_uint "$mtime" || return 0
   (( now - mtime >= ${CLAUDE_STATUSLINE_API_INTERVAL:-60} )) || return 0
   # Touch first: concurrent ticks of other sessions now see a fresh stamp.
