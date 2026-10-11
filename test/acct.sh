@@ -21,6 +21,7 @@ export XDG_CACHE_HOME="$work/cache"
 export CLAUDE_ACCT_ACTIVE_SVC="Claude Code-credentials"
 export CLAUDE_ACCT_SLOT_SVC="claude-statusline-account"
 export CLAUDE_ACCT_NOTIFY=0
+export CLAUDE_STATUSLINE_API_REFRESH=0   # enabled only in its own test below
 export CLAUDE_ACCT_NUDGE_DELAY=0
 export STUB_KC="$work/kc" STUB_TMUX="$work/tmux"
 mkdir -p "$HOME" "$XDG_CONFIG_HOME/claude-statusline" "$STUB_KC" "$STUB_TMUX" "$work/bin"
@@ -353,6 +354,34 @@ before=$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)
 set_kc "$CLAUDE_ACCT_SLOT_SVC" INFO "$(cred info7)"; before=$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)
 "$acct" refresh >/dev/null 2>&1
 if [[ "$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)" == "$before" ]]; then ok "a failed renewal leaves the slot untouched"; else bad "slot changed on failed renewal" "$(kc "$CLAUDE_ACCT_SLOT_SVC" INFO)"; fi
+
+# ============ use renews the target ============
+login_as jay@example.com jay9
+set_kc "$CLAUDE_ACCT_SLOT_SVC" INFO "$(cred info8)"   # expired access token
+printf '{"access_token":"at-info9","refresh_token":"rt-info9","expires_in":3600}' >"$STUB_TMUX/renew-rt-info8"
+CLAUDE_ACCT_NUDGE_DELAY=0 "$acct" use INFO --no-nudge >/dev/null 2>&1
+if [[ "$(jq -r .claudeAiOauth.accessToken <<<"$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)")" == at-info9 ]]; then ok "use renews an expired target token before activating it"; else bad "use renewal" "$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)"; fi
+set_kc "$CLAUDE_ACCT_SLOT_SVC" JAY "$(cred jay10)"   # renewal will fail: no renew file
+CLAUDE_ACCT_NUDGE_DELAY=0 "$acct" use JAY --no-nudge >/dev/null 2>&1
+if [[ "$(jq -r .claudeAiOauth.accessToken <<<"$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)")" == at-jay10 ]]; then ok "use still switches when the renewal fails"; else bad "use without renewal" "$(kc "$CLAUDE_ACCT_ACTIVE_SVC" jh)"; fi
+
+# ============ background API refresh ============
+echo "background API refresh ..."
+cat >"$work/bin/acct-stub" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"$STUB_TMUX/acct-calls"
+STUB
+chmod +x "$work/bin/acct-stub"
+rm -f "$STUB_TMUX/acct-calls" "$XDG_CACHE_HOME/claude-statusline/api-refresh"
+for _ in 1 2 3; do
+  printf '{"model":{"display_name":"Opus"}}' | CLAUDE_STATUSLINE_API_REFRESH=1 CLAUDE_ACCT_BIN="$work/bin/acct-stub" "$statusline" >/dev/null 2>&1
+done
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$STUB_TMUX/acct-calls" ]] && break; sleep 0.1; done
+if [[ "$(cat "$STUB_TMUX/acct-calls" 2>/dev/null)" == "refresh --active" ]]; then ok "the status line starts one background API refresh per interval, not one per tick"; else bad "background refresh" "$(cat "$STUB_TMUX/acct-calls" 2>/dev/null)"; fi
+touch -t 202001010000 "$XDG_CACHE_HOME/claude-statusline/api-refresh"
+printf '{"model":{"display_name":"Opus"}}' | CLAUDE_STATUSLINE_API_REFRESH=1 CLAUDE_ACCT_BIN="$work/bin/acct-stub" "$statusline" >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do (( $(wc -l <"$STUB_TMUX/acct-calls") >= 2 )) && break; sleep 0.1; done
+if (( $(wc -l <"$STUB_TMUX/acct-calls") == 2 )); then ok "after the interval the next tick refreshes again"; else bad "refresh after interval" "$(cat "$STUB_TMUX/acct-calls")"; fi
 
 printf '/dev/ttys000 clipboard,focus,title\n/dev/ttys001 clipboard,hyperlinks,title\n' >"$STUB_TMUX/clients"
 doc=$(TMUX=/tmp/stub,1,0 "$acct" doctor 2>&1)

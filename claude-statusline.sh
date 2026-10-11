@@ -378,6 +378,30 @@ account_rows() {
   printf '%s' "$out"
 }
 
+# api_refresh_maybe: at most once a minute across all sessions, start
+# `claude-acct refresh --active` in the background. It writes the active
+# account's usage straight from the API over the shared cache.
+#
+# Session payloads cannot prove which account they belong to: right after a
+# switch, a session still holding the previous account's numbers can publish
+# them under the new one (DEV's 5h 89% showed on JAY, really 3%). The API
+# reading is the truth and corrects any such leak within a minute.
+api_refresh_maybe() {
+  [[ "${CLAUDE_STATUSLINE_API_REFRESH:-1}" == 1 ]] || return 0
+  local acct=${CLAUDE_ACCT_BIN:-"$(dirname "${BASH_SOURCE[0]}")/claude-acct"}
+  [[ -x "$acct" ]] || return 0
+  local dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
+  local stamp="$dir/api-refresh" now mtime
+  now=$(date +%s)
+  mtime=$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)
+  is_uint "$now" && is_uint "$mtime" || return 0
+  (( now - mtime >= ${CLAUDE_STATUSLINE_API_INTERVAL:-60} )) || return 0
+  # Touch first: concurrent ticks of other sessions now see a fresh stamp.
+  mkdir -p "$dir" 2>/dev/null && touch "$stamp" 2>/dev/null || return 0
+  ( "$acct" refresh --active >/dev/null 2>&1 & ) 2>/dev/null
+  return 0
+}
+
 render() {
   local input=$1
   local segments=()
@@ -426,6 +450,7 @@ render() {
 
   local email
   email=$(current_email)
+  [[ -n "$email" ]] && api_refresh_maybe
 
   # Replace this session's possibly stale snapshot with the newest reading any
   # session of the same account has seen.

@@ -134,8 +134,11 @@ claude-acct doctor          # checks the setup, never prints secrets
 Once accounts are saved, the status line lists each one on its own line (see
 the table above). Cmd+click a name to switch. A `+ login` link at the end of the
 first line opens `claude-acct login` in a new tmux window (or a new Ghostty
-window without tmux). Other accounts' numbers come from the cache that sessions
-of that account publish, and from `claude-acct refresh`.
+window without tmux). The active account's 5h and 7d are read from the usage
+API in the background, at most once a minute across all sessions
+(`CLAUDE_STATUSLINE_API_REFRESH=0` turns that off, `CLAUDE_STATUSLINE_API_INTERVAL`
+changes the seconds). Other accounts show the last numbers their sessions or
+`claude-acct refresh` saw.
 
 `claude-acct login` runs `claude auth login` with a temporary
 `CLAUDE_CONFIG_DIR`, which gets its own credential store, so the open sessions

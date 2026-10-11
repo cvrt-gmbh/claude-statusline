@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- After a switch the active account could show the previous account's 5h for
+  hours (JAY showed DEV's 89%, really 3%). The status line now starts
+  `claude-acct refresh --active` in the background at most once a minute
+  across all sessions, so the API's 5h and 7d overwrite any leaked value, and
+  `use` renews the target's expired token before activating it so the refresh
+  right after a switch works.
 - A session that still carried the previous account's numbers right after a
   switch could publish them under the new account, and because that account's
   week reset later, they stuck: INFO showed JAY's 7d 10% while its real 7d was

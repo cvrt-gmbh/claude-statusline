@@ -37,6 +37,8 @@ reset_future_7d=$(( now + 259200 ))  # 3d
 # would publish into and read from the developer's live shared usage cache.
 export XDG_CONFIG_HOME="$work_dir/config"
 export XDG_CACHE_HOME="$work_dir/cache"
+# Never start the background API refresh: it would read the real keychain.
+export CLAUDE_STATUSLINE_API_REFRESH=0
 mkdir -p "$XDG_CONFIG_HOME/claude-statusline" "$work_dir/nohome"
 export HOME="$work_dir/nohome"
 

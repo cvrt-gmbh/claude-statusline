@@ -10,7 +10,7 @@
 #   claude-acct login [EMAIL]    log in to another account and save it, open sessions untouched
 #   claude-acct use LABEL        switch every session to LABEL, then nudge
 #   claude-acct list             saved accounts, active one, cached usage
-#   claude-acct refresh          reload every account's usage from the API
+#   claude-acct refresh [--active] reload usage from the API (all, or the active account)
 #   claude-acct nudge [--dry-run] send "continue" to sessions stopped by a limit
 #   claude-acct handle-url URL   entry point for claude-acct://use/LABEL links
 #   claude-acct install-handler  build the URL handler app (macOS)
@@ -284,6 +284,15 @@ cmd_use() {
     kc_write "$SLOT_SVC" "$cur_label" "$active" || die "could not bank $cur_label's credential, nothing changed"
   fi
 
+  # Renew the target's access token while it is still inactive: the slot is then
+  # its only holder, so rotating it is safe. Without this, an account unused for
+  # hours becomes active with an expired token, and the refresh below cannot
+  # read its usage until a session renews it.
+  if ! fetch_usage "$target" >/dev/null 2>&1; then
+    local renewed
+    renewed=$(renew_slot "$label" "$target") && target=$renewed
+  fi
+
   kc_write "$ACTIVE_SVC" "$acct" "$target" || die "could not write the active credential"
   set_oauth_account "$profile" || die "credential switched but $CLAUDE_JSON was not updated; run again"
 
@@ -411,6 +420,8 @@ renew_slot() {
 # The active account is read with the live credential, the others with their
 # slot. Run after every switch, so a switch never starts from borrowed numbers.
 cmd_refresh() {
+  local only_active=0
+  [[ "${1:-}" == "--active" ]] && only_active=1
   local email cur f label pemail blob usage tmp
   email=$(current_email)
   cur=$(label_for_email "$email")
@@ -420,6 +431,7 @@ cmd_refresh() {
     [[ -f "$f" ]] || continue
     label=$(basename "$f" .json)
     valid_label "$label" || continue
+    (( only_active )) && [[ "$label" != "$cur" ]] && continue
     pemail=$(jq -r '.emailAddress // empty' "$f" 2>/dev/null)
     [[ -n "$pemail" ]] || continue
     if [[ "$label" == "$cur" ]]; then
@@ -441,7 +453,7 @@ cmd_refresh() {
     fi
     unset blob
   done
-  log "refresh"
+  (( only_active )) || log "refresh"
 }
 
 cmd_list() {
@@ -539,7 +551,7 @@ main() {
     login) cmd_login "$@" ;;
     use) cmd_use "$@" ;;
     list) cmd_list ;;
-    refresh) cmd_refresh ;;
+    refresh) cmd_refresh "$@" ;;
     nudge) cmd_nudge "$@" ;;
     handle-url) cmd_handle_url "$@" ;;
     install-handler) cmd_install_handler ;;
